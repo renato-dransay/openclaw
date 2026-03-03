@@ -220,10 +220,6 @@ public final class GatewayDiscoveryModel {
     private func recomputeGateways() {
         let primary = self.sortedDeduped(gateways: self.gatewaysByDomain.values.flatMap(\.self))
         let primaryFiltered = self.filterLocalGateways ? primary.filter { !$0.isLocal } : primary
-        if !primaryFiltered.isEmpty {
-            self.gateways = primaryFiltered
-            return
-        }
 
         // Bonjour can return only "local" results for the wide-area domain (or no results at all),
         // and cross-network setups may rely on Tailscale Serve without DNS-SD.

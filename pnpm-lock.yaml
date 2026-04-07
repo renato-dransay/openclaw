@@ -487,8 +487,8 @@ importers:
   extensions/memory-episodes:
     dependencies:
       '@sinclair/typebox':
-        specifier: 0.34.48
-        version: 0.34.48
+        specifier: 0.34.49
+        version: 0.34.49
       pg:
         specifier: ^8.13.0
         version: 8.20.0
@@ -512,8 +512,8 @@ importers:
   extensions/memory-mem0:
     dependencies:
       '@sinclair/typebox':
-        specifier: 0.34.48
-        version: 0.34.48
+        specifier: 0.34.49
+        version: 0.34.49
     devDependencies:
       openclaw:
         specifier: workspace:*

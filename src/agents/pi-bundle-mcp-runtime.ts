@@ -3,6 +3,25 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+
+/**
+ * Strip the $schema dialect URI from MCP tool inputSchemas.
+ * MCP servers like Playwright MCP emit JSON Schema 2020-12 dialect markers
+ * (e.g. "$schema": "https://json-schema.org/draft/2020-12/schema") which AJV
+ * (configured for draft-07) cannot resolve, causing "no schema with key or ref" errors.
+ * Removing the $schema keyword is safe — AJV defaults to its configured draft.
+ */
+function stripSchemaDialect(schema: unknown): unknown {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return schema;
+  }
+  const record = schema as Record<string, unknown>;
+  if ("$schema" in record) {
+    const { $schema: _, ...rest } = record;
+    return rest;
+  }
+  return schema;
+}
 import type { OpenClawConfig } from "../config/config.js";
 import { logWarn } from "../logger.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
@@ -207,7 +226,7 @@ export function createSessionMcpRuntime(params: {
                 toolName,
                 title: tool.title,
                 description: tool.description?.trim() || undefined,
-                inputSchema: tool.inputSchema,
+                inputSchema: stripSchemaDialect(tool.inputSchema),
                 fallbackDescription: `Provided by bundle MCP server "${serverName}" (${resolved.description}).`,
               });
             }

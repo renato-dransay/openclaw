@@ -145,7 +145,10 @@ export const CronPayloadSchema = Type.Union([
     },
     { additionalProperties: false },
   ),
-  cronAgentTurnPayloadSchema({ message: NonEmptyString }),
+  cronAgentTurnPayloadSchema({
+    message: NonEmptyString,
+    toolsAllow: Type.Array(Type.String()),
+  }),
 ]);
 
 export const CronPayloadPatchSchema = Type.Union([
@@ -156,7 +159,10 @@ export const CronPayloadPatchSchema = Type.Union([
     },
     { additionalProperties: false },
   ),
-  cronAgentTurnPayloadSchema({ message: Type.Optional(NonEmptyString) }),
+  cronAgentTurnPayloadSchema({
+    message: Type.Optional(NonEmptyString),
+    toolsAllow: Type.Union([Type.Array(Type.String()), Type.Null()]),
+  }),
 ]);
 
 export const CronFailureAlertSchema = Type.Object(

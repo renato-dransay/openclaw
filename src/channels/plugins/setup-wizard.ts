@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "../../config/config.js";
 import { DEFAULT_ACCOUNT_ID } from "../../routing/session-key.js";
+import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import type { WizardPrompter } from "../../wizard/prompts.js";
 import { configureChannelAccessWithAllowlist } from "./setup-group-access-configure.js";
 import type { ChannelAccessPolicy } from "./setup-group-access.js";
@@ -10,6 +11,7 @@ import {
   splitSetupEntries,
 } from "./setup-wizard-helpers.js";
 import type {
+  ChannelSetupPlugin,
   ChannelSetupWizardAdapter,
   ChannelSetupConfigureContext,
   ChannelSetupDmPolicy,
@@ -17,7 +19,6 @@ import type {
   ChannelSetupStatusContext,
 } from "./setup-wizard-types.js";
 import type { ChannelSetupInput } from "./types.core.js";
-import type { ChannelPlugin } from "./types.js";
 
 export type ChannelSetupWizardStatus = {
   configuredLabel: string;
@@ -26,17 +27,23 @@ export type ChannelSetupWizardStatus = {
   unconfiguredHint?: string;
   configuredScore?: number;
   unconfiguredScore?: number;
-  resolveConfigured: (params: { cfg: OpenClawConfig }) => boolean | Promise<boolean>;
+  resolveConfigured: (params: {
+    cfg: OpenClawConfig;
+    accountId?: string;
+  }) => boolean | Promise<boolean>;
   resolveStatusLines?: (params: {
     cfg: OpenClawConfig;
+    accountId?: string;
     configured: boolean;
   }) => string[] | Promise<string[]>;
   resolveSelectionHint?: (params: {
     cfg: OpenClawConfig;
+    accountId?: string;
     configured: boolean;
   }) => string | undefined | Promise<string | undefined>;
   resolveQuickstartScore?: (params: {
     cfg: OpenClawConfig;
+    accountId?: string;
     configured: boolean;
   }) => number | undefined | Promise<number | undefined>;
 };
@@ -276,16 +283,18 @@ export type ChannelSetupWizard = {
   onAccountRecorded?: ChannelSetupWizardAdapter["onAccountRecorded"];
 };
 
-type ChannelSetupWizardPlugin = Pick<ChannelPlugin, "id" | "meta" | "config" | "setup">;
+type ChannelSetupWizardPlugin = ChannelSetupPlugin;
 
 async function buildStatus(
   plugin: ChannelSetupWizardPlugin,
   wizard: ChannelSetupWizard,
   ctx: ChannelSetupStatusContext,
 ): Promise<ChannelSetupStatus> {
-  const configured = await wizard.status.resolveConfigured({ cfg: ctx.cfg });
+  const accountId = ctx.accountOverrides[plugin.id];
+  const configured = await wizard.status.resolveConfigured({ cfg: ctx.cfg, accountId });
   const statusLines = (await wizard.status.resolveStatusLines?.({
     cfg: ctx.cfg,
+    accountId,
     configured,
   })) ?? [
     `${plugin.meta.label}: ${configured ? wizard.status.configuredLabel : wizard.status.unconfiguredLabel}`,
@@ -293,11 +302,13 @@ async function buildStatus(
   const selectionHint =
     (await wizard.status.resolveSelectionHint?.({
       cfg: ctx.cfg,
+      accountId,
       configured,
     })) ?? (configured ? wizard.status.configuredHint : wizard.status.unconfiguredHint);
   const quickstartScore =
     (await wizard.status.resolveQuickstartScore?.({
       cfg: ctx.cfg,
+      accountId,
       configured,
     })) ?? (configured ? wizard.status.configuredScore : wizard.status.unconfiguredScore);
   return {
@@ -352,8 +363,7 @@ function applySetupInput(params: {
 }
 
 function trimResolvedValue(value?: string): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
+  return normalizeOptionalString(value);
 }
 
 function collectCredentialValues(params: {

@@ -34,23 +34,8 @@ import {
 import type { ReplyPayload } from "../../auto-reply/types.js";
 import type { CliDeps } from "../../cli/outbound-send-deps.js";
 import type { OpenClawConfig } from "../../config/config.js";
-import {
-  resolveSessionTranscriptPath,
-  setSessionRuntimeModel,
-  updateSessionStore,
-} from "../../config/sessions.js";
-import { registerAgentRunContext } from "../../infra/agent-events.js";
-import { logWarn } from "../../logger.js";
-import { normalizeAgentId } from "../../routing/session-key.js";
-import {
-  buildSafeExternalPrompt,
-  detectSuspiciousPatterns,
-  mapHookExternalContentSource,
-  isExternalHookSession,
-  resolveHookExternalContentSource,
-} from "../../security/external-content.js";
-import { estimateUsageCost, resolveModelCostConfig } from "../../utils/usage-format.js";
-import { resolveCronDeliveryPlan } from "../delivery.js";
+import type { AgentDefaultsConfig } from "../../config/types.agent-defaults.js";
+import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import type { CronJob, CronRunOutcome, CronRunTelemetry } from "../types.js";
 import {
   dispatchCronDelivery,
@@ -65,10 +50,54 @@ import {
 } from "./helpers.js";
 import { resolveCronModelSelection } from "./model-selection.js";
 import { buildCronAgentDefaultsConfig } from "./run-config.js";
+import { executeCronRun, type CronExecutionResult } from "./run-executor.js";
+import {
+  createPersistCronSessionEntry,
+  markCronSessionPreRun,
+  persistCronSkillsSnapshotIfChanged,
+  type CronLiveSelection,
+  type MutableCronSession,
+  type PersistCronSessionEntry,
+} from "./run-session-state.js";
+import {
+  DEFAULT_CONTEXT_TOKENS,
+  buildSafeExternalPrompt,
+  deriveSessionTotalTokens,
+  detectSuspiciousPatterns,
+  ensureAgentWorkspace,
+  hasNonzeroUsage,
+  isCliProvider,
+  isExternalHookSession,
+  loadModelCatalog,
+  logWarn,
+  lookupContextTokens,
+  mapHookExternalContentSource,
+  normalizeAgentId,
+  normalizeThinkLevel,
+  resolveAgentConfig,
+  resolveAgentDir,
+  resolveAgentTimeoutMs,
+  resolveAgentWorkspaceDir,
+  resolveCronStyleNow,
+  resolveDefaultAgentId,
+  resolveHookExternalContentSource,
+  resolveSessionAuthProfileOverride,
+  resolveThinkingDefault,
+  setSessionRuntimeModel,
+  supportsXHighThinking,
+} from "./run.runtime.js";
 import { resolveCronAgentSessionKey } from "./session-key.js";
 import { resolveCronSession } from "./session.js";
 import { resolveCronSkillsSnapshot } from "./skills-snapshot.js";
-import { isLikelyInterimCronMessage } from "./subagent-followup.js";
+
+let sessionStoreRuntimePromise:
+  | Promise<typeof import("../../config/sessions/store.runtime.js")>
+  | undefined;
+
+async function loadSessionStoreRuntime() {
+  sessionStoreRuntimePromise ??= import("../../config/sessions/store.runtime.js");
+  return await sessionStoreRuntimePromise;
+}
 
 function resolveNonNegativeNumber(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
@@ -238,228 +267,50 @@ export async function runCronIsolatedAgentTurn(params: {
       : "cron: job execution timed out";
   };
   const isFastTestEnv = process.env.OPENCLAW_TEST_FAST === "1";
-  const deliveryContract = params.deliveryContract ?? "cron-owned";
-  const defaultAgentId = resolveDefaultAgentId(params.cfg);
-  const requestedAgentId =
-    typeof params.agentId === "string" && params.agentId.trim()
-      ? params.agentId
-      : typeof params.job.agentId === "string" && params.job.agentId.trim()
-        ? params.job.agentId
-        : undefined;
-  const normalizedRequested = requestedAgentId ? normalizeAgentId(requestedAgentId) : undefined;
-  const agentConfigOverride = normalizedRequested
-    ? resolveAgentConfig(params.cfg, normalizedRequested)
-    : undefined;
-  // Use the requested agentId even when there is no explicit agent config entry.
-  // This ensures auth-profiles, workspace, and agentDir all resolve to the
-  // correct per-agent paths (e.g. ~/.openclaw/agents/<agentId>/agent/).
-  const agentId = normalizedRequested ?? defaultAgentId;
-  const agentCfg = buildCronAgentDefaultsConfig({
-    defaults: params.cfg.agents?.defaults,
-    agentConfigOverride,
-  });
-  const cfgWithAgentDefaults: OpenClawConfig = {
-    ...params.cfg,
-    agents: Object.assign({}, params.cfg.agents, { defaults: agentCfg }),
-  };
-  let catalog: Awaited<ReturnType<typeof loadModelCatalog>> | undefined;
-  const loadCatalog = async () => {
-    if (!catalog) {
-      catalog = await loadModelCatalog({ config: cfgWithAgentDefaults });
-    }
-    return catalog;
-  };
-
-  const baseSessionKey = (params.sessionKey?.trim() || `cron:${params.job.id}`).trim();
-  const agentSessionKey = resolveCronAgentSessionKey({
-    sessionKey: baseSessionKey,
-    agentId,
-    mainKey: params.cfg.session?.mainKey,
-    cfg: params.cfg,
-  });
-  const payloadHookExternalContentSource =
-    params.job.payload.kind === "agentTurn" ? params.job.payload.externalContentSource : undefined;
-  const hookExternalContentSource =
-    payloadHookExternalContentSource ?? resolveHookExternalContentSource(baseSessionKey);
-
-  const workspaceDirRaw = resolveAgentWorkspaceDir(params.cfg, agentId);
-  const agentDir = resolveAgentDir(params.cfg, agentId);
-  const workspace = await ensureAgentWorkspace({
-    dir: workspaceDirRaw,
-    ensureBootstrapFiles: !agentCfg?.skipBootstrap && !isFastTestEnv,
-  });
-  const workspaceDir = workspace.dir;
-
-  // Resolve model - prefer hooks.gmail.model for Gmail hooks.
-  const isGmailHook = hookExternalContentSource === "gmail";
-  const now = Date.now();
-  const cronSession = resolveCronSession({
-    cfg: params.cfg,
-    sessionKey: agentSessionKey,
-    agentId,
-    nowMs: now,
-    // Isolated cron runs must not carry prior turn context across executions.
-    forceNew: params.job.sessionTarget === "isolated",
-  });
-  const runSessionId = cronSession.sessionEntry.sessionId;
-  const runSessionKey = baseSessionKey.startsWith("cron:")
-    ? `${agentSessionKey}:run:${runSessionId}`
-    : agentSessionKey;
-  const persistSessionEntry = async () => {
-    if (isFastTestEnv) {
-      return;
-    }
-    cronSession.store[agentSessionKey] = cronSession.sessionEntry;
-    if (runSessionKey !== agentSessionKey) {
-      cronSession.store[runSessionKey] = cronSession.sessionEntry;
-    }
-    await updateSessionStore(cronSession.storePath, (store) => {
-      store[agentSessionKey] = cronSession.sessionEntry;
-      if (runSessionKey !== agentSessionKey) {
-        store[runSessionKey] = cronSession.sessionEntry;
-      }
-    });
-  };
-  const withRunSession = (
-    result: Omit<RunCronAgentTurnResult, "sessionId" | "sessionKey">,
-  ): RunCronAgentTurnResult => ({
-    ...result,
-    sessionId: runSessionId,
-    sessionKey: runSessionKey,
-  });
-  if (!cronSession.sessionEntry.label?.trim() && baseSessionKey.startsWith("cron:")) {
-    const labelSuffix =
-      typeof params.job.name === "string" && params.job.name.trim()
-        ? params.job.name.trim()
-        : params.job.id;
-    cronSession.sessionEntry.label = `Cron: ${labelSuffix}`;
+  const prepared = await prepareCronRunContext({ input: params, isFastTestEnv });
+  if (!prepared.ok) {
+    return prepared.result;
   }
 
-  const resolvedModelSelection = await resolveCronModelSelection({
-    cfg: params.cfg,
-    cfgWithAgentDefaults,
-    agentConfigOverride,
-    sessionEntry: cronSession.sessionEntry,
-    payload: params.job.payload,
-    isGmailHook,
-  });
-  if (!resolvedModelSelection.ok) {
-    return { status: "error", error: resolvedModelSelection.error };
-  }
-  let provider = resolvedModelSelection.provider;
-  let model = resolvedModelSelection.model;
-  if (resolvedModelSelection.warning) {
-    logWarn(resolvedModelSelection.warning);
-  }
-
-  // Resolve thinking level - job thinking > hooks.gmail.thinking > model/global defaults
-  const hooksGmailThinking = isGmailHook
-    ? normalizeThinkLevel(params.cfg.hooks?.gmail?.thinking)
-    : undefined;
-  const jobThink = normalizeThinkLevel(
-    (params.job.payload.kind === "agentTurn" ? params.job.payload.thinking : undefined) ??
-      undefined,
-  );
-  let thinkLevel = jobThink ?? hooksGmailThinking;
-  if (!thinkLevel) {
-    thinkLevel = resolveThinkingDefault({
-      cfg: cfgWithAgentDefaults,
-      provider,
-      model,
-      catalog: await loadCatalog(),
-    });
-  }
-  if (thinkLevel === "xhigh" && !supportsXHighThinking(provider, model)) {
-    logWarn(
-      `[cron:${params.job.id}] Thinking level "xhigh" is not supported for ${provider}/${model}; downgrading to "high".`,
-    );
-    thinkLevel = "high";
-  }
-
-  const timeoutMs = resolveAgentTimeoutMs({
-    cfg: cfgWithAgentDefaults,
-    overrideSeconds:
-      params.job.payload.kind === "agentTurn" ? params.job.payload.timeoutSeconds : undefined,
-  });
-
-  const agentPayload = params.job.payload.kind === "agentTurn" ? params.job.payload : null;
-  const { deliveryRequested, resolvedDelivery, toolPolicy } = await resolveCronDeliveryContext({
-    cfg: cfgWithAgentDefaults,
-    job: params.job,
-    agentId,
-    deliveryContract,
-  });
-
-  const { formattedTime, timeLine } = resolveCronStyleNow(params.cfg, now);
-  const base = `[cron:${params.job.id} ${params.job.name}] ${params.message}`.trim();
-
-  // SECURITY: Wrap external hook content with security boundaries to prevent prompt injection
-  // unless explicitly allowed via a dangerous config override.
-  const isExternalHook =
-    hookExternalContentSource !== undefined || isExternalHookSession(baseSessionKey);
-  const allowUnsafeExternalContent =
-    agentPayload?.allowUnsafeExternalContent === true ||
-    (isGmailHook && params.cfg.hooks?.gmail?.allowUnsafeExternalContent === true);
-  const shouldWrapExternal = isExternalHook && !allowUnsafeExternalContent;
-  let commandBody: string;
-
-  if (isExternalHook) {
-    // Log suspicious patterns for security monitoring
-    const suspiciousPatterns = detectSuspiciousPatterns(params.message);
-    if (suspiciousPatterns.length > 0) {
-      logWarn(
-        `[security] Suspicious patterns detected in external hook content ` +
-          `(session=${baseSessionKey}, patterns=${suspiciousPatterns.length}): ${suspiciousPatterns.slice(0, 3).join(", ")}`,
-      );
-    }
-  }
-
-  if (shouldWrapExternal) {
-    // Wrap external content with security boundaries
-    const hookType = mapHookExternalContentSource(hookExternalContentSource ?? "webhook");
-    const safeContent = buildSafeExternalPrompt({
-      content: params.message,
-      source: hookType,
-      jobName: params.job.name,
-      jobId: params.job.id,
-      timestamp: formattedTime,
-    });
-
-    commandBody = `${safeContent}\n\n${timeLine}`.trim();
-  } else {
-    // Internal/trusted source - use original format
-    commandBody = `${base}\n${timeLine}`.trim();
-  }
-  commandBody = appendCronDeliveryInstruction({ commandBody, deliveryRequested });
-
-  const existingSkillsSnapshot = cronSession.sessionEntry.skillsSnapshot;
-  const skillsSnapshot = resolveCronSkillsSnapshot({
-    workspaceDir,
-    config: cfgWithAgentDefaults,
-    agentId,
-    existingSnapshot: existingSkillsSnapshot,
-    isFastTestEnv,
-  });
-  if (!isFastTestEnv && skillsSnapshot !== existingSkillsSnapshot) {
-    cronSession.sessionEntry = {
-      ...cronSession.sessionEntry,
-      updatedAt: Date.now(),
-      skillsSnapshot,
-    };
-    await persistSessionEntry();
-  }
-
-  // Persist the intended model and systemSent before the run so that
-  // sessions_list reflects the cron override even if the run fails or is
-  // still in progress (#21057).  Best-effort: a filesystem error here
-  // must not prevent the actual agent run from executing.
-  cronSession.sessionEntry.modelProvider = provider;
-  cronSession.sessionEntry.model = model;
-  cronSession.sessionEntry.systemSent = true;
   try {
-    await persistSessionEntry();
+    const execution = await executeCronRun({
+      cfg: params.cfg,
+      cfgWithAgentDefaults: prepared.context.cfgWithAgentDefaults,
+      job: params.job,
+      agentId: prepared.context.agentId,
+      agentDir: prepared.context.agentDir,
+      agentSessionKey: prepared.context.agentSessionKey,
+      workspaceDir: prepared.context.workspaceDir,
+      lane: params.lane,
+      resolvedDelivery: {
+        channel: prepared.context.resolvedDelivery.channel,
+        accountId: prepared.context.resolvedDelivery.accountId,
+      },
+      toolPolicy: prepared.context.toolPolicy,
+      skillsSnapshot: prepared.context.skillsSnapshot,
+      agentPayload: prepared.context.agentPayload,
+      agentVerboseDefault: prepared.context.agentCfg?.verboseDefault,
+      liveSelection: prepared.context.liveSelection,
+      cronSession: prepared.context.cronSession,
+      commandBody: prepared.context.commandBody,
+      persistSessionEntry: prepared.context.persistSessionEntry,
+      abortSignal,
+      abortReason,
+      isAborted,
+      thinkLevel: prepared.context.thinkLevel,
+      timeoutMs: prepared.context.timeoutMs,
+    });
+    if (isAborted()) {
+      return prepared.context.withRunSession({ status: "error", error: abortReason() });
+    }
+    return await finalizeCronRun({
+      prepared: prepared.context,
+      execution,
+      abortReason,
+      isAborted,
+    });
   } catch (err) {
-    logWarn(`[cron:${params.job.id}] Failed to persist pre-run session entry: ${String(err)}`);
+    return prepared.context.withRunSession({ status: "error", error: String(err) });
   }
 
   // Resolve auth profile for the session, mirroring the inbound auto-reply path

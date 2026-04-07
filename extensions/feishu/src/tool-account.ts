@@ -1,4 +1,5 @@
 import type * as Lark from "@larksuiteoapi/node-sdk";
+import { normalizeOptionalString } from "openclaw/plugin-sdk/text-runtime";
 import type { OpenClawPluginApi } from "../runtime-api.js";
 import {
   listFeishuAccountIds,
@@ -11,18 +12,13 @@ import type { FeishuToolsConfig, ResolvedFeishuAccount } from "./types.js";
 
 type AccountAwareParams = { accountId?: string };
 
-function normalizeOptionalAccountId(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
-}
-
 function readConfiguredDefaultAccountId(config: OpenClawPluginApi["config"]): string | undefined {
   const value = (config?.channels?.feishu as { defaultAccount?: unknown } | undefined)
     ?.defaultAccount;
   if (typeof value !== "string") {
     return undefined;
   }
-  return normalizeOptionalAccountId(value);
+  return normalizeOptionalString(value);
 }
 
 function resolveImplicitToolAccountId(params: {
@@ -30,9 +26,23 @@ function resolveImplicitToolAccountId(params: {
   executeParams?: AccountAwareParams;
   defaultAccountId?: string;
 }): string | undefined {
-  const explicitAccountId = normalizeOptionalAccountId(params.executeParams?.accountId);
+  const explicitAccountId = normalizeOptionalString(params.executeParams?.accountId);
   if (explicitAccountId) {
     return explicitAccountId;
+  }
+
+  const contextualAccountId = normalizeOptionalString(params.defaultAccountId);
+  if (
+    contextualAccountId &&
+    listFeishuAccountIds(params.api.config).includes(contextualAccountId)
+  ) {
+    const contextualAccount = resolveFeishuAccount({
+      cfg: params.api.config,
+      accountId: contextualAccountId,
+    });
+    if (contextualAccount.enabled) {
+      return contextualAccountId;
+    }
   }
 
   const configuredDefaultAccountId = readConfiguredDefaultAccountId(params.api.config);
@@ -40,20 +50,7 @@ function resolveImplicitToolAccountId(params: {
     return configuredDefaultAccountId;
   }
 
-  const contextualAccountId = normalizeOptionalAccountId(params.defaultAccountId);
-  if (!contextualAccountId) {
-    return undefined;
-  }
-
-  if (!listFeishuAccountIds(params.api.config).includes(contextualAccountId)) {
-    return undefined;
-  }
-
-  const contextualAccount = resolveFeishuAccount({
-    cfg: params.api.config,
-    accountId: contextualAccountId,
-  });
-  return contextualAccount.enabled ? contextualAccountId : undefined;
+  return undefined;
 }
 
 export function resolveFeishuToolAccount(params: {

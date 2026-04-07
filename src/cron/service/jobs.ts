@@ -1,11 +1,13 @@
 import crypto from "node:crypto";
 import { normalizeAgentId } from "../../routing/session-key.js";
+import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { parseAbsoluteTimeMs } from "../parse.js";
 import {
   coerceFiniteScheduleNumber,
   computeNextRunAtMs,
   computePreviousRunAtMs,
 } from "../schedule.js";
+import { assertSafeCronSessionTargetId } from "../session-target.js";
 import {
   normalizeCronStaggerMs,
   resolveCronStaggerMs,
@@ -136,6 +138,9 @@ export function assertSupportedJobSpec(job: Pick<CronJob, "sessionTarget" | "pay
     job.sessionTarget === "isolated" ||
     job.sessionTarget === "current" ||
     job.sessionTarget.startsWith("session:");
+  if (job.sessionTarget.startsWith("session:")) {
+    assertSafeCronSessionTargetId(job.sessionTarget.slice(8));
+  }
   if (job.sessionTarget === "main" && job.payload.kind !== "systemEvent") {
     throw new Error('main cron jobs require payload.kind="systemEvent"');
   }
@@ -163,23 +168,6 @@ function assertMainSessionAgentId(
   }
 }
 
-const TELEGRAM_TME_URL_REGEX = /^https?:\/\/t\.me\/|t\.me\//i;
-const TELEGRAM_SLASH_TOPIC_REGEX = /^-?\d+\/\d+$/;
-
-function validateTelegramDeliveryTarget(to: string | undefined): string | undefined {
-  if (!to) {
-    return undefined;
-  }
-  const trimmed = to.trim();
-  if (TELEGRAM_TME_URL_REGEX.test(trimmed)) {
-    return undefined;
-  }
-  if (TELEGRAM_SLASH_TOPIC_REGEX.test(trimmed)) {
-    return `Invalid Telegram delivery target "${to}". Use colon (:) as delimiter for topics, not slash. Valid formats: -1001234567890, -1001234567890:123, -1001234567890:topic:123, @username, https://t.me/username`;
-  }
-  return undefined;
-}
-
 function assertDeliverySupport(job: Pick<CronJob, "sessionTarget" | "delivery">) {
   // No delivery object or mode is "none" -- nothing to validate.
   if (!job.delivery || job.delivery.mode === "none") {
@@ -200,12 +188,6 @@ function assertDeliverySupport(job: Pick<CronJob, "sessionTarget" | "delivery">)
     job.sessionTarget.startsWith("session:");
   if (!isIsolatedLike) {
     throw new Error('cron channel delivery config is only supported for sessionTarget="isolated"');
-  }
-  if (job.delivery.channel === "telegram") {
-    const telegramError = validateTelegramDeliveryTarget(job.delivery.to);
-    if (telegramError) {
-      throw new Error(telegramError);
-    }
   }
 }
 
@@ -687,6 +669,14 @@ function mergeCronPayload(existing: CronPayload, patch: CronPayloadPatch): CronP
   if (typeof patch.model === "string") {
     next.model = patch.model;
   }
+  if (Array.isArray(patch.fallbacks)) {
+    next.fallbacks = patch.fallbacks;
+  }
+  if (Array.isArray(patch.toolsAllow)) {
+    next.toolsAllow = patch.toolsAllow;
+  } else if (patch.toolsAllow === null) {
+    delete next.toolsAllow;
+  }
   if (typeof patch.thinking === "string") {
     next.thinking = patch.thinking;
   }
@@ -733,6 +723,8 @@ function buildPayloadFromPatch(patch: CronPayloadPatch): CronPayload {
     kind: "agentTurn",
     message: patch.message,
     model: patch.model,
+    fallbacks: patch.fallbacks,
+    toolsAllow: Array.isArray(patch.toolsAllow) ? patch.toolsAllow : undefined,
     thinking: patch.thinking,
     timeoutSeconds: patch.timeoutSeconds,
     lightContext: patch.lightContext,
@@ -746,8 +738,7 @@ function buildPayloadFromPatch(patch: CronPayloadPatch): CronPayload {
 }
 
 function normalizeOptionalTrimmedString(value: unknown): string | undefined {
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  return trimmed ? trimmed : undefined;
+  return normalizeOptionalString(value);
 }
 
 function normalizeOptionalThreadId(value: unknown): string | number | undefined {

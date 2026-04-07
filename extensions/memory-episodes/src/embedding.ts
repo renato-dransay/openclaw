@@ -15,8 +15,9 @@ type OllamaEmbedResponse = {
   error?: string;
 };
 
-// nomic-embed-text supports 8192 tokens; ~4 chars/token → ~30K char safety limit
-const MAX_EMBED_CHARS = 30_000;
+// nomic-embed-text via Ollama reports context_length=2048; ~3.5 chars/token → ~7K safe limit.
+// The model card claims 8192 but Ollama's BERT runner doesn't honor num_ctx overrides.
+const MAX_EMBED_CHARS = 7_000;
 
 export async function embed(text: string, config: EmbeddingConfig): Promise<number[]> {
   const input = text.length > MAX_EMBED_CHARS ? text.slice(0, MAX_EMBED_CHARS) : text;
@@ -27,7 +28,8 @@ export async function embed(text: string, config: EmbeddingConfig): Promise<numb
     body: JSON.stringify({
       model: config.model,
       input,
-      options: { num_ctx: 8192 },
+      // num_ctx is ignored by Ollama's BERT embedding runner; truncation handles safety
+      options: { num_ctx: 2048 },
     }),
   });
 

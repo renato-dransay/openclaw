@@ -1,7 +1,7 @@
 import { Type, type TSchema } from "@sinclair/typebox";
 import { NonEmptyString } from "./primitives.js";
 
-function cronAgentTurnPayloadSchema(params: { message: TSchema }) {
+function cronAgentTurnPayloadSchema(params: { message: TSchema; toolsAllow: TSchema }) {
   const completionContractSchema = Type.Object(
     {
       requiredPhrases: Type.Array(NonEmptyString, { minItems: 1 }),
@@ -18,6 +18,7 @@ function cronAgentTurnPayloadSchema(params: { message: TSchema }) {
       timeoutSeconds: Type.Optional(Type.Integer({ minimum: 0 })),
       allowUnsafeExternalContent: Type.Optional(Type.Boolean()),
       lightContext: Type.Optional(Type.Boolean()),
+      toolsAllow: Type.Optional(params.toolsAllow),
       deliver: Type.Optional(Type.Boolean()),
       channel: Type.Optional(Type.String()),
       to: Type.Optional(Type.String()),

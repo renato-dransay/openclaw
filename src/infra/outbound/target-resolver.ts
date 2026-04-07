@@ -486,13 +486,15 @@ export async function resolveMessagingTarget(params: {
     }
   }
 
-  const resolvedFallbackTarget = await maybeResolvePluginTarget({
-    cfg: params.cfg,
-    channel: params.channel,
-    input: raw,
-    accountId: params.accountId,
-    preferredKind: params.preferredKind,
-  });
+  const resolvedFallbackTarget = asResolvedMessagingTarget(
+    await maybeResolvePluginMessagingTarget({
+      cfg: params.cfg,
+      channel: params.channel,
+      input: raw,
+      accountId: params.accountId,
+      preferredKind: params.preferredKind,
+    }),
+  );
   if (resolvedFallbackTarget) {
     return {
       ok: true,

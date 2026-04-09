@@ -1,18 +1,15 @@
+import type { ResolvedMattermostAccount } from "./accounts.js";
 import {
-  getPluginCommandSpecs,
-  listSkillCommandsForAgents,
-  parseStrictPositiveInteger,
-  type OpenClawConfig,
-  type RuntimeEnv,
-} from "../runtime-api.js";
-import { listEnabledMattermostAccounts, type ResolvedMattermostAccount } from "./accounts.js";
-import {
-  createMattermostClient,
-  fetchMattermostMe,
   fetchMattermostUserTeams,
   normalizeMattermostBaseUrl,
   type MattermostClient,
 } from "./client.js";
+import {
+  listSkillCommandsForAgents,
+  parseStrictPositiveInteger,
+  type OpenClawConfig,
+  type RuntimeEnv,
+} from "./runtime-api.js";
 import {
   DEFAULT_COMMAND_SPECS,
   isSlashCommandsEnabled,
@@ -81,10 +78,9 @@ function buildSlashCommands(params: {
     } catch (err) {
       params.runtime.error?.(`mattermost: failed to list skill commands: ${String(err)}`);
     }
+  } catch (err) {
+    params.runtime.error?.(`mattermost: failed to list skill commands: ${String(err)}`);
   }
-
-  commandsToRegister.push(...collectPluginCommands({ runtime: params.runtime }));
-
   return commandsToRegister;
 }
 
@@ -268,20 +264,11 @@ export async function registerMattermostMonitorSlashCommands(params: {
       );
     }
 
-    const triggerMap = buildTriggerMap(dedupedCommands);
-    const botUserIdMap = await buildBotUserIdMap({
-      cfg: params.cfg,
-      account: params.account,
-      botUserId: params.botUserId,
-      runtime: params.runtime,
-    });
-
     activateSlashCommands({
       account: params.account,
       commandTokens: registered.map((cmd) => cmd.token).filter(Boolean),
       registeredCommands: registered,
-      triggerMap,
-      botUserIdMap,
+      triggerMap: buildTriggerMap(dedupedCommands),
       api: { cfg: params.cfg, runtime: params.runtime },
       log: (msg) => params.runtime.log?.(msg),
     });

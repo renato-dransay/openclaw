@@ -12,11 +12,14 @@ export function buildOpenAICodexCliBackend(): CliBackendPlugin {
     liveTest: {
       defaultModelRef: CODEX_CLI_DEFAULT_MODEL_REF,
       defaultImageProbe: true,
+      defaultMcpProbe: true,
       docker: {
         npmPackage: "@openai/codex",
         binaryName: "codex",
       },
     },
+    bundleMcp: true,
+    bundleMcpMode: "codex-config-overrides",
     config: {
       command: "codex",
       args: [
@@ -35,6 +38,9 @@ export function buildOpenAICodexCliBackend(): CliBackendPlugin {
       modelArg: "--model",
       sessionIdFields: ["thread_id"],
       sessionMode: "existing",
+      systemPromptFileConfigArg: "-c",
+      systemPromptFileConfigKey: "model_instructions_file",
+      systemPromptWhen: "first",
       imageArg: "--image",
       imageMode: "repeat",
       reliability: {

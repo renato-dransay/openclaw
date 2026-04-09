@@ -1,19 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
 import { normalizeProviderId } from "../agents/provider-id.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { buildPluginApi } from "./api-builder.js";
+import { collectPluginConfigContractMatches } from "./config-contracts.js";
 import { discoverOpenClawPlugins } from "./discovery.js";
+import { getCachedPluginJitiLoader, type PluginJitiLoaderCache } from "./jiti-loader-cache.js";
 import { loadPluginManifestRegistry } from "./manifest-registry.js";
 import { resolvePluginCacheInputs } from "./roots.js";
 import type { PluginRuntime } from "./runtime/types.js";
-import {
-  buildPluginLoaderAliasMap,
-  buildPluginLoaderJitiOptions,
-  shouldPreferNativeJiti,
-} from "./sdk-alias.js";
 import type {
   CliBackendPlugin,
   OpenClawPluginModule,
@@ -68,37 +64,28 @@ const NOOP_LOGGER: PluginLogger = {
   error() {},
 };
 
-const jitiLoaders = new Map<string, ReturnType<typeof createJiti>>();
+const jitiLoaders: PluginJitiLoaderCache = new Map();
 const setupRegistryCache = new Map<string, PluginSetupRegistry>();
 const setupProviderCache = new Map<string, ProviderPlugin | null>();
 
 export function clearPluginSetupRegistryCache(): void {
+  jitiLoaders.clear();
   setupRegistryCache.clear();
   setupProviderCache.clear();
 }
 
 function getJiti(modulePath: string) {
-  const aliasMap = buildPluginLoaderAliasMap(modulePath, process.argv[1], import.meta.url);
-  const tryNative = shouldPreferNativeJiti(modulePath);
-  const cacheKey = JSON.stringify({
-    tryNative,
-    aliasMap: Object.entries(aliasMap).toSorted(([left], [right]) => left.localeCompare(right)),
+  return getCachedPluginJitiLoader({
+    cache: jitiLoaders,
+    modulePath,
+    importerUrl: import.meta.url,
   });
-  const cached = jitiLoaders.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-  const loader = createJiti(modulePath, {
-    ...buildPluginLoaderJitiOptions(aliasMap),
-    tryNative,
-  });
-  jitiLoaders.set(cacheKey, loader);
-  return loader;
 }
 
 function buildSetupRegistryCacheKey(params: {
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
+  pluginIds?: readonly string[];
 }): string {
   const { roots, loadPaths } = resolvePluginCacheInputs({
     workspaceDir: params.workspaceDir,
@@ -107,6 +94,7 @@ function buildSetupRegistryCacheKey(params: {
   return JSON.stringify({
     roots,
     loadPaths,
+    pluginIds: params.pluginIds ? [...new Set(params.pluginIds)].toSorted() : null,
   });
 }
 
@@ -160,6 +148,48 @@ function resolveSetupApiPath(rootDir: string): string | null {
   return null;
 }
 
+function collectConfiguredPluginEntryIds(config: OpenClawConfig): string[] {
+  const entries = config.plugins?.entries;
+  if (!entries || typeof entries !== "object") {
+    return [];
+  }
+  return Object.keys(entries)
+    .map((pluginId) => pluginId.trim())
+    .filter(Boolean)
+    .toSorted();
+}
+
+function resolveRelevantSetupMigrationPluginIds(params: {
+  config: OpenClawConfig;
+  workspaceDir?: string;
+  env?: NodeJS.ProcessEnv;
+}): string[] {
+  const ids = new Set<string>(collectConfiguredPluginEntryIds(params.config));
+  const registry = loadPluginManifestRegistry({
+    workspaceDir: params.workspaceDir,
+    env: params.env,
+    cache: true,
+  });
+  for (const plugin of registry.plugins) {
+    const paths = plugin.configContracts?.compatibilityMigrationPaths;
+    if (!paths?.length) {
+      continue;
+    }
+    if (
+      paths.some(
+        (pathPattern) =>
+          collectPluginConfigContractMatches({
+            root: params.config,
+            pathPattern,
+          }).length > 0,
+      )
+    ) {
+      ids.add(plugin.id);
+    }
+  }
+  return [...ids].toSorted();
+}
+
 function resolveRegister(mod: OpenClawPluginModule): {
   definition?: { id?: string };
   register?: (api: ReturnType<typeof buildPluginApi>) => void | Promise<void>;
@@ -189,15 +219,31 @@ function matchesProvider(provider: ProviderPlugin, providerId: string): boolean 
 export function resolvePluginSetupRegistry(params?: {
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
+  pluginIds?: readonly string[];
 }): PluginSetupRegistry {
   const env = params?.env ?? process.env;
   const cacheKey = buildSetupRegistryCacheKey({
     workspaceDir: params?.workspaceDir,
     env,
+    pluginIds: params?.pluginIds,
   });
   const cached = setupRegistryCache.get(cacheKey);
   if (cached) {
     return cached;
+  }
+
+  const selectedPluginIds = params?.pluginIds
+    ? new Set(params.pluginIds.map((pluginId) => pluginId.trim()).filter(Boolean))
+    : null;
+  if (selectedPluginIds && selectedPluginIds.size === 0) {
+    const empty = {
+      providers: [],
+      cliBackends: [],
+      configMigrations: [],
+      autoEnableProbes: [],
+    } satisfies PluginSetupRegistry;
+    setupRegistryCache.set(cacheKey, empty);
+    return empty;
   }
 
   const providers: SetupProviderEntry[] = [];
@@ -221,6 +267,9 @@ export function resolvePluginSetupRegistry(params?: {
   });
 
   for (const record of manifestRegistry.plugins) {
+    if (selectedPluginIds && !selectedPluginIds.has(record.id)) {
+      continue;
+    }
     const setupSource = record.setupSource ?? resolveSetupApiPath(record.rootDir);
     if (!setupSource) {
       continue;
@@ -516,8 +565,16 @@ export function runPluginSetupConfigMigrations(params: {
 } {
   let next = params.config;
   const changes: string[] = [];
+  const pluginIds = resolveRelevantSetupMigrationPluginIds(params);
+  if (pluginIds.length === 0) {
+    return { config: next, changes };
+  }
 
-  for (const entry of resolvePluginSetupRegistry(params).configMigrations) {
+  for (const entry of resolvePluginSetupRegistry({
+    workspaceDir: params.workspaceDir,
+    env: params.env,
+    pluginIds,
+  }).configMigrations) {
     const migration = entry.migrate(next);
     if (!migration || migration.changes.length === 0) {
       continue;

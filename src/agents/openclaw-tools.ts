@@ -5,6 +5,10 @@ import { normalizeDeliveryContext } from "../utils/delivery-context.js";
 import type { GatewayMessageChannel } from "../utils/message-channel.js";
 import { resolveAgentWorkspaceDir, resolveSessionAgentId } from "./agent-scope.js";
 import { resolveOpenClawPluginToolsForOptions } from "./openclaw-plugin-tools.js";
+import {
+  collectPresentOpenClawTools,
+  isUpdatePlanToolEnabledForOpenClawTools,
+} from "./openclaw-tools.registration.js";
 import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import type { SpawnedToolContext } from "./spawned-context.js";
 import type { ToolFsPolicy } from "./tool-fs-policy.js";
@@ -42,15 +46,6 @@ const defaultOpenClawToolsDeps: OpenClawToolsDeps = {
 };
 
 let openClawToolsDeps: OpenClawToolsDeps = defaultOpenClawToolsDeps;
-
-function isOpenAIProvider(provider?: string): boolean {
-  const normalized = provider?.trim().toLowerCase();
-  return normalized === "openai" || normalized === "openai-codex";
-}
-
-function isExperimentalPlanToolEnabled(config?: OpenClawConfig): boolean {
-  return config?.tools?.experimental?.planTool === true;
-}
 
 export function createOpenClawTools(
   options?: {
@@ -230,9 +225,7 @@ export function createOpenClawTools(
       agentChannel: options?.agentChannel,
       config: options?.config,
     }),
-    ...(imageGenerateTool ? [imageGenerateTool] : []),
-    ...(musicGenerateTool ? [musicGenerateTool] : []),
-    ...(videoGenerateTool ? [videoGenerateTool] : []),
+    ...collectPresentOpenClawTools([imageGenerateTool, musicGenerateTool, videoGenerateTool]),
     createGatewayTool({
       agentSessionKey: options?.agentSessionKey,
       config: options?.config,
@@ -241,7 +234,7 @@ export function createOpenClawTools(
       agentSessionKey: options?.agentSessionKey,
       requesterAgentIdOverride: options?.requesterAgentIdOverride,
     }),
-    ...(isExperimentalPlanToolEnabled(resolvedConfig) || isOpenAIProvider(options?.modelProvider)
+    ...(isUpdatePlanToolEnabledForOpenClawTools(resolvedConfig, options?.modelProvider)
       ? [createUpdatePlanTool()]
       : []),
     createSessionsListTool({
@@ -288,10 +281,7 @@ export function createOpenClawTools(
       config: resolvedConfig,
       sandboxed: options?.sandboxed,
     }),
-    ...(webSearchTool ? [webSearchTool] : []),
-    ...(webFetchTool ? [webFetchTool] : []),
-    ...(imageTool ? [imageTool] : []),
-    ...(pdfTool ? [pdfTool] : []),
+    ...collectPresentOpenClawTools([webSearchTool, webFetchTool, imageTool, pdfTool]),
   ];
 
   if (options?.disablePluginTools) {

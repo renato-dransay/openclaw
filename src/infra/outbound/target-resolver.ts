@@ -6,12 +6,16 @@ import type {
 } from "../../channels/plugins/types.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { defaultRuntime, type RuntimeEnv } from "../../runtime.js";
+import { normalizeLowercaseStringOrEmpty } from "../../shared/string-coerce.js";
 import { buildDirectoryCacheKey, DirectoryCache } from "./directory-cache.js";
 import { ambiguousTargetError, unknownTargetError } from "./target-errors.js";
 import {
   buildTargetResolverSignature,
+  looksLikeTargetId,
+  maybeResolvePluginMessagingTarget,
   normalizeChannelTargetInput,
   normalizeTargetForProvider,
+  resolveNormalizedTargetInput,
 } from "./target-normalization.js";
 
 export type TargetResolveKind = ChannelDirectoryEntryKind | "channel";
@@ -28,6 +32,12 @@ export type ResolvedMessagingTarget = {
 export type ResolveMessagingTargetResult =
   | { ok: true; target: ResolvedMessagingTarget }
   | { ok: false; error: Error; candidates?: ChannelDirectoryEntry[] };
+
+function asResolvedMessagingTarget(
+  target: Awaited<ReturnType<typeof maybeResolvePluginMessagingTarget>>,
+): ResolvedMessagingTarget | undefined {
+  return target;
+}
 
 export async function resolveChannelTarget(params: {
   cfg: OpenClawConfig;
@@ -47,52 +57,12 @@ export async function maybeResolveIdLikeTarget(params: {
   accountId?: string | null;
   preferredKind?: TargetResolveKind;
 }): Promise<ResolvedMessagingTarget | undefined> {
-  const raw = normalizeChannelTargetInput(params.input);
-  if (!raw) {
-    return undefined;
-  }
-  return await maybeResolvePluginTarget(params, { requireIdLike: true });
-}
-
-async function maybeResolvePluginTarget(
-  params: {
-    cfg: OpenClawConfig;
-    channel: ChannelId;
-    input: string;
-    accountId?: string | null;
-    preferredKind?: TargetResolveKind;
-  },
-  options?: { requireIdLike?: boolean },
-): Promise<ResolvedMessagingTarget | undefined> {
-  const raw = normalizeChannelTargetInput(params.input);
-  if (!raw) {
-    return undefined;
-  }
-  const plugin = getChannelPlugin(params.channel);
-  const resolver = plugin?.messaging?.targetResolver;
-  if (!resolver?.resolveTarget) {
-    return undefined;
-  }
-  const normalized = normalizeTargetForProvider(params.channel, raw) ?? raw;
-  if (options?.requireIdLike && resolver.looksLikeId && !resolver.looksLikeId(raw, normalized)) {
-    return undefined;
-  }
-  const resolved = await resolver.resolveTarget({
-    cfg: params.cfg,
-    accountId: params.accountId,
-    input: raw,
-    normalized,
-    preferredKind: params.preferredKind,
-  });
-  if (!resolved) {
-    return undefined;
-  }
-  return {
-    to: resolved.to,
-    kind: resolved.kind,
-    display: resolved.display,
-    source: resolved.source ?? "normalized",
-  };
+  return asResolvedMessagingTarget(
+    await maybeResolvePluginMessagingTarget({
+      ...params,
+      requireIdLike: true,
+    }),
+  );
 }
 
 const CACHE_TTL_MS = 30 * 60 * 1000;
@@ -117,7 +87,7 @@ export function resetDirectoryCache(params?: { channel?: ChannelId; accountId?: 
 }
 
 function normalizeQuery(value: string): string {
-  return value.trim().toLowerCase();
+  return normalizeLowercaseStringOrEmpty(value);
 }
 
 function stripTargetPrefixes(value: string): string {
@@ -143,7 +113,7 @@ export function formatTargetDisplay(params: {
   }
 
   const trimmedTarget = params.target.trim();
-  const lowered = trimmedTarget.toLowerCase();
+  const lowered = normalizeLowercaseStringOrEmpty(trimmedTarget);
   const display = params.display?.trim();
   const kind =
     params.kind ??
@@ -170,7 +140,7 @@ export function formatTargetDisplay(params: {
   }
 
   const channelPrefix = `${params.channel}:`;
-  const withoutProvider = trimmedTarget.toLowerCase().startsWith(channelPrefix)
+  const withoutProvider = lowered.startsWith(channelPrefix)
     ? trimmedTarget.slice(channelPrefix.length)
     : trimmedTarget;
 
@@ -394,34 +364,16 @@ export async function resolveMessagingTarget(params: {
   const providerLabel = plugin?.meta?.label ?? params.channel;
   const hint = plugin?.messaging?.targetResolver?.hint;
   const kind = detectTargetKind(params.channel, raw, params.preferredKind);
-  const normalized = normalizeTargetForProvider(params.channel, raw) ?? raw;
-  const looksLikeTargetId = (): boolean => {
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      return false;
-    }
-    const lookup = plugin?.messaging?.targetResolver?.looksLikeId;
-    if (lookup) {
-      return lookup(trimmed, normalized);
-    }
-    if (/^(channel|group|user):/i.test(trimmed)) {
-      return true;
-    }
-    if (/^[@#]/.test(trimmed)) {
-      return true;
-    }
-    if (/^\+?\d{6,}$/.test(trimmed)) {
-      return true;
-    }
-    if (trimmed.includes("@thread")) {
-      return true;
-    }
-    if (/^(conversation|user):/i.test(trimmed)) {
-      return true;
-    }
-    return false;
-  };
-  if (looksLikeTargetId()) {
+  const normalizedInput = resolveNormalizedTargetInput(params.channel, raw);
+  const normalized = normalizedInput?.normalized ?? raw;
+  if (
+    normalizedInput &&
+    looksLikeTargetId({
+      channel: params.channel,
+      raw: normalizedInput.raw,
+      normalized,
+    })
+  ) {
     const resolvedIdLikeTarget = await maybeResolveIdLikeTarget({
       cfg: params.cfg,
       channel: params.channel,
@@ -485,63 +437,15 @@ export async function resolveMessagingTarget(params: {
       candidates: match.entries,
     };
   }
-  // When the inferred kind didn't match (e.g. "god" defaulted to "group" but
-  // is actually a username), try the opposite kind before giving up.
-  if (!params.preferredKind) {
-    const alternateKind = kind === "user" ? "group" : "user";
-    const altEntries = await getDirectoryEntries({
+  const resolvedFallbackTarget = asResolvedMessagingTarget(
+    await maybeResolvePluginMessagingTarget({
       cfg: params.cfg,
       channel: params.channel,
+      input: raw,
       accountId: params.accountId,
-      kind: alternateKind === "user" ? "user" : "group",
-      query,
-      runtime: params.runtime,
-      preferLiveOnMiss: true,
-    });
-    const altMatch = resolveMatch({ channel: params.channel, entries: altEntries, query });
-    if (altMatch.kind === "single") {
-      const entry = altMatch.entry;
-      return {
-        ok: true,
-        target: {
-          to: normalizeDirectoryEntryId(params.channel, entry),
-          kind: alternateKind,
-          display: entry.name ?? entry.handle ?? stripTargetPrefixes(entry.id),
-          source: "directory",
-        },
-      };
-    }
-    if (altMatch.kind === "ambiguous") {
-      const mode = params.resolveAmbiguous ?? "error";
-      if (mode !== "error") {
-        const best = pickAmbiguousMatch(altMatch.entries, mode);
-        if (best) {
-          return {
-            ok: true,
-            target: {
-              to: normalizeDirectoryEntryId(params.channel, best),
-              kind: alternateKind,
-              display: best.name ?? best.handle ?? stripTargetPrefixes(best.id),
-              source: "directory",
-            },
-          };
-        }
-      }
-      return {
-        ok: false,
-        error: ambiguousTargetError(providerLabel, raw, hint),
-        candidates: altMatch.entries,
-      };
-    }
-  }
-
-  const resolvedFallbackTarget = await maybeResolvePluginTarget({
-    cfg: params.cfg,
-    channel: params.channel,
-    input: raw,
-    accountId: params.accountId,
-    preferredKind: params.preferredKind,
-  });
+      preferredKind: params.preferredKind,
+    }),
+  );
   if (resolvedFallbackTarget) {
     return {
       ok: true,

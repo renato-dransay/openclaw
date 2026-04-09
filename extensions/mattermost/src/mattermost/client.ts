@@ -1,4 +1,11 @@
-import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
+import {
+  fetchWithSsrFGuard,
+  ssrfPolicyFromPrivateNetworkOptIn,
+} from "openclaw/plugin-sdk/ssrf-runtime";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/text-runtime";
 import { z } from "openclaw/plugin-sdk/zod";
 
 export type MattermostFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -82,31 +89,6 @@ export async function readMattermostError(res: Response): Promise<string> {
   return await res.text();
 }
 
-/**
- * Infer whether the target Mattermost URL is on a private/internal network.
- * When `allowPrivateNetwork` is not explicitly set by callers, this prevents
- * SSRF guards from blocking legitimate self-hosted/Docker setups (e.g.
- * `host.docker.internal`, `*.local`, `localhost`, RFC-1918 IPs).
- */
-function inferAllowPrivateNetwork(baseUrl: string, explicit?: boolean): boolean {
-  if (explicit !== undefined) return explicit;
-  try {
-    const hostname = new URL(baseUrl).hostname.toLowerCase();
-    return (
-      hostname === "localhost" ||
-      hostname.endsWith(".local") ||
-      hostname.endsWith(".internal") ||
-      hostname.startsWith("10.") ||
-      hostname.startsWith("192.168.") ||
-      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
-      hostname === "127.0.0.1" ||
-      hostname === "[::1]"
-    );
-  } catch {
-    return false;
-  }
-}
-
 export function createMattermostClient(params: {
   baseUrl: string;
   botToken: string;
@@ -118,7 +100,6 @@ export function createMattermostClient(params: {
   if (!baseUrl) {
     throw new Error("Mattermost baseUrl is required");
   }
-  const allowPrivateNetwork = inferAllowPrivateNetwork(baseUrl, params.allowPrivateNetwork);
   const apiBaseUrl = `${baseUrl}/api/v4`;
   const token = params.botToken.trim();
   // When no custom fetchImpl is provided (production path), use an SSRF-guarded wrapper
@@ -133,16 +114,12 @@ export function createMattermostClient(params: {
 
   const guardedFetchImpl: MattermostFetch = async (input, init) => {
     const url =
-      typeof input === "string"
-        ? input
-        : input instanceof URL
-          ? input.toString()
-          : (input as Request).url;
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const { response, release } = await fetchWithSsrFGuard({
       url,
       init,
       auditContext: "mattermost-api",
-      policy: allowPrivateNetwork ? { allowPrivateNetwork: true } : undefined,
+      policy: ssrfPolicyFromPrivateNetworkOptIn(params.allowPrivateNetwork),
     });
     try {
       const bodyBytes = NULL_BODY_STATUSES.has(response.status)
@@ -371,7 +348,7 @@ export async function createMattermostDirectChannelWithRetry(
 function isRetryableError(error: Error): boolean {
   const candidates = collectErrorCandidates(error);
   const messages = candidates
-    .map((candidate) => readErrorMessage(candidate)?.toLowerCase())
+    .map((candidate) => normalizeLowercaseStringOrEmpty(readErrorMessage(candidate)))
     .filter((message): message is string => Boolean(message));
 
   // Retry on 5xx server errors FIRST (before checking 4xx)
@@ -528,32 +505,10 @@ export async function createMattermostPost(
   if (params.props) {
     payload.props = params.props;
   }
-  try {
-    return await client.request<MattermostPost>("/posts", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-  } catch (err) {
-    // When the thread root post was deleted or is otherwise invalid,
-    // fall back to a channel-level post so the message still gets delivered.
-    if (params.rootId && err instanceof Error && err.message.includes("Invalid RootId")) {
-      const fallbackPayload: Record<string, unknown> = {
-        channel_id: params.channelId,
-        message: params.message,
-      };
-      if (params.fileIds?.length) {
-        fallbackPayload.file_ids = params.fileIds;
-      }
-      if (params.props) {
-        fallbackPayload.props = params.props;
-      }
-      return await client.request<MattermostPost>("/posts", {
-        method: "POST",
-        body: JSON.stringify(fallbackPayload),
-      });
-    }
-    throw err;
-  }
+  return await client.request<MattermostPost>("/posts", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export type MattermostTeam = {
@@ -600,7 +555,7 @@ export async function uploadMattermostFile(
   },
 ): Promise<MattermostFileInfo> {
   const form = new FormData();
-  const fileName = params.fileName?.trim() || "upload";
+  const fileName = normalizeOptionalString(params.fileName) ?? "upload";
   const bytes = Uint8Array.from(params.buffer);
   const blob = params.contentType
     ? new Blob([bytes], { type: params.contentType })

@@ -5,6 +5,7 @@ import {
   type MattermostClient,
 } from "./client.js";
 import {
+  getPluginCommandSpecs,
   listSkillCommandsForAgents,
   parseStrictPositiveInteger,
   type OpenClawConfig,
@@ -78,9 +79,10 @@ function buildSlashCommands(params: {
     } catch (err) {
       params.runtime.error?.(`mattermost: failed to list skill commands: ${String(err)}`);
     }
-  } catch (err) {
-    params.runtime.error?.(`mattermost: failed to list skill commands: ${String(err)}`);
   }
+
+  commandsToRegister.push(...collectPluginCommands({ runtime: params.runtime }));
+
   return commandsToRegister;
 }
 
@@ -104,48 +106,6 @@ function buildTriggerMap(commands: MattermostCommandSpec[]): Map<string, string>
     }
   }
   return triggerMap;
-}
-
-async function buildBotUserIdMap(params: {
-  cfg: OpenClawConfig;
-  account: ResolvedMattermostAccount;
-  botUserId: string;
-  runtime: RuntimeEnv;
-}): Promise<Map<string, string>> {
-  const botUserIdMap = new Map<string, string>();
-  botUserIdMap.set(params.botUserId, params.account.accountId);
-
-  const otherAccounts = listEnabledMattermostAccounts(params.cfg).filter(
-    (a) => a.accountId !== params.account.accountId && a.botToken && a.baseUrl,
-  );
-
-  if (otherAccounts.length > 0) {
-    const results = await Promise.allSettled(
-      otherAccounts.map(async (a) => {
-        const c = createMattermostClient({
-          baseUrl: a.baseUrl!,
-          botToken: a.botToken!,
-          allowPrivateNetwork: (a.config as Record<string, unknown>)?.allowPrivateNetwork === true,
-        });
-        const u = await fetchMattermostMe(c);
-        return { mattermostUserId: u.id, accountId: a.accountId };
-      }),
-    );
-    for (const result of results) {
-      if (result.status === "fulfilled") {
-        botUserIdMap.set(result.value.mattermostUserId, result.value.accountId);
-      } else {
-        params.runtime.error?.(
-          `mattermost: failed to fetch user ID for bot account during slash setup: ${String(result.reason)}`,
-        );
-      }
-    }
-    params.runtime.log?.(
-      `mattermost: slash DM routing map built with ${botUserIdMap.size} bot account(s)`,
-    );
-  }
-
-  return botUserIdMap;
 }
 
 function warnOnSuspiciousCallbackUrl(params: {
@@ -264,11 +224,12 @@ export async function registerMattermostMonitorSlashCommands(params: {
       );
     }
 
+    const triggerMap = buildTriggerMap(dedupedCommands);
     activateSlashCommands({
       account: params.account,
       commandTokens: registered.map((cmd) => cmd.token).filter(Boolean),
       registeredCommands: registered,
-      triggerMap: buildTriggerMap(dedupedCommands),
+      triggerMap,
       api: { cfg: params.cfg, runtime: params.runtime },
       log: (msg) => params.runtime.log?.(msg),
     });
@@ -317,7 +278,6 @@ export async function registerMattermostMonitorSlashCommands(params: {
             commandTokens: [...registered.map((c) => c.token).filter(Boolean), ...newTokens],
             registeredCommands: [...registered, ...lateRegistered],
             triggerMap: new Map([...triggerMap, ...lateTriggerMap]),
-            botUserIdMap,
             api: { cfg: params.cfg, runtime: params.runtime },
             log: (msg) => params.runtime.log?.(msg),
           });

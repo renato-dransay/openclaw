@@ -1,4 +1,8 @@
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/text-runtime";
 import { z } from "openclaw/plugin-sdk/zod";
 
 export type MattermostFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -122,6 +126,7 @@ export function createMattermostClient(params: {
   }
   const apiBaseUrl = `${baseUrl}/api/v4`;
   const token = params.botToken.trim();
+  const allowPrivateNetwork = inferAllowPrivateNetwork(baseUrl, params.allowPrivateNetwork);
   // When no custom fetchImpl is provided (production path), use an SSRF-guarded wrapper
   // that validates the target URL before making the request (DNS rebinding protection etc.).
   // A custom fetchImpl is accepted for testing and special cases.

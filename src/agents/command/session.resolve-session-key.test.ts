@@ -97,6 +97,38 @@ describe("resolveSessionKeyForRequest", () => {
     expect(result.storePath).toBe("/stores/other.json");
   });
 
+  it("builds an isolated explicit key when both sessionId and agentId are provided, ignoring a matching main-session entry in any store", () => {
+    // Regression: OpenClaw runtime workflows pass --agent <id> --session-id wf-<runId>-<stepId>
+    // to get a fresh isolated session per workflow step. Previously, the cross-store match
+    // logic could land on agent:roxy:main when the main session's stored sessionId happened
+    // to match, loading a 12+ MB session file and triggering context overflow before any
+    // real work started. When both sessionId and agentId are provided, we must always
+    // build agent:<id>:explicit:<sessionId> and never fall back to main.
+    const roxyStore = {
+      "agent:roxy:main": { sessionId: "wf-34-build-developer-list", updatedAt: 100 },
+    } satisfies Record<string, SessionEntry>;
+    hoisted.loadSessionStoreMock.mockImplementation((storePath) => {
+      if (storePath === "/stores/roxy.json") {
+        return roxyStore;
+      }
+      return {};
+    });
+
+    const result = resolveSessionKeyForRequest({
+      cfg: {
+        session: {
+          store: "/stores/{agentId}.json",
+        },
+      } satisfies OpenClawConfig,
+      sessionId: "wf-34-build-developer-list",
+      agentId: "roxy",
+    });
+
+    expect(result.sessionKey).toBe("agent:roxy:explicit:wf-34-build-developer-list");
+    expect(result.storePath).toBe("/stores/roxy.json");
+    expect(result.sessionStore).toBe(roxyStore);
+  });
+
   it("scopes stored session-key lookup to the requested agent store", () => {
     const embeddedAgentStore = {
       "agent:embedded-agent:main": { sessionId: "other-session", updatedAt: 2 },

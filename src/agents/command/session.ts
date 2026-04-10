@@ -136,6 +136,24 @@ export function resolveSessionKeyForRequest(opts: {
   const sessionCfg = opts.cfg.session;
   const scope = sessionCfg?.scope ?? "per-sender";
   const mainKey = normalizeMainKey(sessionCfg?.mainKey);
+
+  // Hard isolation for per-step workflow invocations: when the caller provides
+  // both --agent and --session-id (and no explicit --session-key), always build
+  // a dedicated `agent:<id>:explicit:<sessionId>` key scoped to that agent's
+  // store. Skipping the cross-store match prevents the resolver from falling
+  // back to `agent:<id>:main`, which previously caused multi-megabyte session
+  // files to load on every OpenClaw runtime workflow step and blow the context
+  // window before any real work ran.
+  if (opts.sessionId?.trim() && opts.agentId?.trim() && !opts.sessionKey?.trim()) {
+    const sessionKey = buildExplicitSessionIdSessionKey({
+      sessionId: opts.sessionId,
+      agentId: opts.agentId,
+    });
+    const storePath = resolveStorePath(sessionCfg?.store, { agentId: opts.agentId });
+    const sessionStore = loadSessionStore(storePath);
+    return { sessionKey, sessionStore, storePath };
+  }
+
   const explicitSessionKey =
     opts.sessionKey?.trim() ||
     resolveExplicitAgentSessionKey({

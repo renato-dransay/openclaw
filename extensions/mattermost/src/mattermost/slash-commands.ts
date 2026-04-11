@@ -190,6 +190,33 @@ export const DEFAULT_COMMAND_SPECS: MattermostCommandSpec[] = [
   },
 ];
 
+// ─── Registration mutex ──────────────────────────────────────────────────────
+
+/**
+ * In-process serialization for slash command registration.
+ *
+ * Many bot accounts can call registerSlashCommands() concurrently against the
+ * same Mattermost team. Mattermost itself does not serialize POST /commands,
+ * so racing creates produce duplicate commands (or 400 "trigger word already
+ * in use" failures). Since every bot in the gateway shares this module, we
+ * serialize registration per (apiBaseUrl, teamId) with a promise chain.
+ */
+const registrationLocks = new Map<string, Promise<unknown>>();
+
+async function withRegistrationLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = registrationLocks.get(key) ?? Promise.resolve();
+  const next = previous.then(fn, fn);
+  // Store a swallowed copy so a rejection in one caller doesn't break the chain.
+  registrationLocks.set(
+    key,
+    next.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return next;
+}
+
 // ─── Command registration ────────────────────────────────────────────────────
 
 /**
@@ -258,6 +285,19 @@ export async function registerSlashCommands(params: {
   commands: MattermostCommandSpec[];
   log?: (msg: string) => void;
 }): Promise<MattermostRegisteredCommand[]> {
+  const { client, teamId } = params;
+  const lockKey = `${client.apiBaseUrl}|team:${teamId}`;
+  return withRegistrationLock(lockKey, () => registerSlashCommandsLocked(params));
+}
+
+async function registerSlashCommandsLocked(params: {
+  client: MattermostClient;
+  teamId: string;
+  creatorUserId: string;
+  callbackUrl: string;
+  commands: MattermostCommandSpec[];
+  log?: (msg: string) => void;
+}): Promise<MattermostRegisteredCommand[]> {
   const { client, teamId, creatorUserId, callbackUrl, commands, log } = params;
   const normalizedCreatorUserId = creatorUserId.trim();
   if (!normalizedCreatorUserId) {
@@ -285,14 +325,16 @@ export async function registerSlashCommands(params: {
 
   const registered: MattermostRegisteredCommand[] = [];
 
+  // A command is "ours" if it was created by this bot account OR points at our
+  // gateway callback URL. The URL check lets sibling OpenClaw bots recognize
+  // each other's registrations and reuse them instead of fighting for ownership.
+  const isOwned = (cmd: MattermostCommandResponse): boolean =>
+    cmd.creator_id?.trim() === normalizedCreatorUserId || cmd.url === callbackUrl;
+
   for (const spec of commands) {
     const existingForTrigger = existingByTrigger.get(spec.trigger) ?? [];
-    const ownedCommands = existingForTrigger.filter(
-      (cmd) => cmd.creator_id?.trim() === normalizedCreatorUserId,
-    );
-    const foreignCommands = existingForTrigger.filter(
-      (cmd) => cmd.creator_id?.trim() !== normalizedCreatorUserId,
-    );
+    const ownedCommands = existingForTrigger.filter(isOwned);
+    const foreignCommands = existingForTrigger.filter((cmd) => !isOwned(cmd));
 
     if (ownedCommands.length === 0 && foreignCommands.length > 0) {
       log?.(
@@ -301,10 +343,32 @@ export async function registerSlashCommands(params: {
       continue;
     }
 
+    // Active dedup: if multiple owned commands exist for this trigger, keep the
+    // oldest (smallest create_at, fall back to id) and delete the rest. This
+    // cleans up duplicates left behind by past races.
     if (ownedCommands.length > 1) {
-      log?.(
-        `mattermost: multiple owned commands found for /${spec.trigger}; using the first and leaving extras untouched`,
-      );
+      ownedCommands.sort((a, b) => {
+        const at = a.create_at ?? 0;
+        const bt = b.create_at ?? 0;
+        if (at !== bt) {
+          return at - bt;
+        }
+        return a.id.localeCompare(b.id);
+      });
+      const extras = ownedCommands.splice(1);
+      for (const extra of extras) {
+        try {
+          await deleteMattermostCommand(client, extra.id);
+          log?.(
+            `mattermost: deleted duplicate command /${spec.trigger} (id=${extra.id}); kept id=${ownedCommands[0]?.id}`,
+          );
+        } catch (err) {
+          // Tolerate 404s from concurrent dedup.
+          log?.(
+            `mattermost: failed to delete duplicate /${spec.trigger} (id=${extra.id}): ${String(err)}`,
+          );
+        }
+      }
     }
 
     const existingCmd = ownedCommands[0];
@@ -387,6 +451,33 @@ export async function registerSlashCommands(params: {
         managed: true,
       });
     } catch (err) {
+      // Race recovery: when many bot accounts start concurrently, they all see
+      // the trigger as absent and race to POST /commands. Only the first wins;
+      // the rest get HTTP 400 "This trigger word is already in use". Re-list
+      // and reuse the winner instead of logging a spurious failure.
+      if (/already in use/i.test(String(err))) {
+        try {
+          const latest = await listMattermostCommands(client, teamId);
+          const winner = latest.find((cmd) => cmd.trigger === spec.trigger);
+          if (winner) {
+            log?.(
+              `mattermost: command /${spec.trigger} already registered by concurrent bot (id=${winner.id}); reusing`,
+            );
+            registered.push({
+              id: winner.id,
+              trigger: spec.trigger,
+              teamId,
+              token: winner.token,
+              managed: false,
+            });
+            continue;
+          }
+        } catch (relistErr) {
+          log?.(
+            `mattermost: failed to re-list commands after race on /${spec.trigger}: ${String(relistErr)}`,
+          );
+        }
+      }
       log?.(`mattermost: failed to register command /${spec.trigger}: ${String(err)}`);
     }
   }

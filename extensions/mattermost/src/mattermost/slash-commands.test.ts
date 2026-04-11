@@ -134,6 +134,179 @@ describe("slash-commands", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it("recovers from concurrent-create races by reusing the winner", async () => {
+    let listCalls = 0;
+    const request = vi.fn(async (path: string, init?: { method?: string }) => {
+      if (path.startsWith("/commands?team_id=")) {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return [];
+        }
+        return [
+          {
+            id: "cmd-winner",
+            token: "tok-winner",
+            team_id: "team-1",
+            creator_id: "other-bot-user",
+            trigger: "oc_status",
+            method: "P",
+            url: "http://gateway/callback",
+            auto_complete: true,
+          },
+        ];
+      }
+      if (path === "/commands" && init?.method === "POST") {
+        throw new Error("Mattermost API 400 : This trigger word is already in use.");
+      }
+      throw new Error(`unexpected request: ${path} (${init?.method})`);
+    });
+    const result = await registerSingleStatusCommand(request);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe("cmd-winner");
+    expect(result[0]?.managed).toBe(false);
+    expect(result[0]?.token).toBe("tok-winner");
+    expect(listCalls).toBe(2);
+  });
+
+  it("treats commands at our callback URL as owned even if creator_id differs", async () => {
+    const request = vi.fn(async (path: string) => {
+      if (path.startsWith("/commands?team_id=")) {
+        return [
+          {
+            id: "cmd-sibling",
+            token: "tok-sibling",
+            team_id: "team-1",
+            creator_id: "sibling-bot-user",
+            trigger: "oc_status",
+            method: "P",
+            url: "http://gateway/callback",
+            auto_complete: true,
+          },
+        ];
+      }
+      throw new Error(`unexpected request path: ${path}`);
+    });
+    const result = await registerSingleStatusCommand(request);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe("cmd-sibling");
+    expect(result[0]?.managed).toBe(false);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("deletes duplicate owned commands and keeps the oldest", async () => {
+    const deleted: string[] = [];
+    const request = vi.fn(async (path: string, init?: { method?: string }) => {
+      if (path.startsWith("/commands?team_id=")) {
+        return [
+          {
+            id: "cmd-newer",
+            token: "tok-newer",
+            team_id: "team-1",
+            creator_id: "bot-user",
+            trigger: "oc_status",
+            method: "P",
+            url: "http://gateway/callback",
+            auto_complete: true,
+            create_at: 2000,
+          },
+          {
+            id: "cmd-older",
+            token: "tok-older",
+            team_id: "team-1",
+            creator_id: "bot-user",
+            trigger: "oc_status",
+            method: "P",
+            url: "http://gateway/callback",
+            auto_complete: true,
+            create_at: 1000,
+          },
+        ];
+      }
+      if (init?.method === "DELETE") {
+        const match = path.match(/^\/commands\/([^/?]+)/);
+        if (match) {
+          deleted.push(decodeURIComponent(match[1]));
+          return {};
+        }
+      }
+      throw new Error(`unexpected request: ${path} (${init?.method})`);
+    });
+    const result = await registerSingleStatusCommand(request);
+
+    expect(deleted).toEqual(["cmd-newer"]);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe("cmd-older");
+    expect(result[0]?.managed).toBe(false);
+  });
+
+  it("serializes concurrent registrations against the same team", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let listCalls = 0;
+    const created = new Map<string, { id: string; token: string; create_at: number }>();
+    let nextId = 1;
+    const request = vi.fn(async (path: string, init?: { method?: string }) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise((r) => setTimeout(r, 5));
+        if (path.startsWith("/commands?team_id=")) {
+          listCalls += 1;
+          return Array.from(created.values()).map((c) => ({
+            id: c.id,
+            token: c.token,
+            team_id: "team-1",
+            creator_id: "bot-user",
+            trigger: "oc_status",
+            method: "P",
+            url: "http://gateway/callback",
+            auto_complete: true,
+            create_at: c.create_at,
+          }));
+        }
+        if (path === "/commands" && init?.method === "POST") {
+          if (created.has("oc_status")) {
+            throw new Error("Mattermost API 400 : This trigger word is already in use.");
+          }
+          const id = `cmd-${nextId++}`;
+          const entry = { id, token: `tok-${id}`, create_at: Date.now() };
+          created.set("oc_status", entry);
+          return {
+            id,
+            token: entry.token,
+            team_id: "team-1",
+            creator_id: "bot-user",
+            trigger: "oc_status",
+            method: "P",
+            url: "http://gateway/callback",
+            auto_complete: true,
+            create_at: entry.create_at,
+          };
+        }
+        throw new Error(`unexpected request: ${path} (${init?.method})`);
+      } finally {
+        inFlight -= 1;
+      }
+    });
+
+    const results = await Promise.all([
+      registerSingleStatusCommand(request),
+      registerSingleStatusCommand(request),
+      registerSingleStatusCommand(request),
+      registerSingleStatusCommand(request),
+      registerSingleStatusCommand(request),
+    ]);
+
+    expect(maxInFlight).toBe(1);
+    expect(created.size).toBe(1);
+    const ids = new Set(results.map((r) => r[0]?.id));
+    expect(ids.size).toBe(1);
+    // First call creates; subsequent calls only need to list.
+    expect(listCalls).toBe(5);
+  });
+
   it("skips foreign command trigger collisions instead of mutating non-owned commands", async () => {
     const request = vi.fn(async (path: string, init?: { method?: string }) => {
       if (path.startsWith("/commands?team_id=")) {

@@ -10,7 +10,7 @@ import { formatUncaughtError } from "../infra/errors.js";
 import { isMainModule } from "../infra/is-main.js";
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import { assertSupportedRuntime } from "../infra/runtime-guard.js";
-import { enableConsoleCapture } from "../logging.js";
+import { enableConsoleCapture, routeLogsToStderr } from "../logging.js";
 import { resolveManifestCommandAliasOwner } from "../plugins/manifest-command-aliases.runtime.js";
 import { hasMemoryRuntime } from "../plugins/memory-state.js";
 import {
@@ -19,6 +19,7 @@ import {
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
 import { resolveCliArgvInvocation } from "./argv-invocation.js";
+import { hasFlag } from "./argv.js";
 import {
   shouldRegisterPrimaryCommandOnly,
   shouldSkipPluginCommandRegistration,
@@ -62,6 +63,38 @@ export function shouldEnsureCliPath(argv: string[]): boolean {
 
 export function shouldUseRootHelpFastPath(argv: string[]): boolean {
   return resolveCliArgvInvocation(argv).isRootHelpInvocation;
+}
+
+/**
+ * Detect --json invocations early (before Commander parses argv) so that log
+ * output is routed to stderr BEFORE any plugin `register()` handler can run.
+ *
+ * Plugin CLI command discovery (see `registerPluginCliCommandsFromValidatedConfig`
+ * in run-main below) invokes `loadOpenClawPlugins()` during `register()`, which
+ * runs plugin `register(api)` functions. Those plugins may call
+ * `api.logger.info(...)`. Until `loggingState.forceConsoleToStderr` is set, info
+ * level writes go to `console.log` (STDOUT). The normal preaction hook sets
+ * this flag via `routeLogsToStderr()` but only after Commander starts parsing,
+ * which is too late for plugin-registration log lines. Those lines then
+ * contaminate the stdout stream that `--json` consumers parse as the result
+ * envelope, producing errors like "Missing expected field: STATUS".
+ *
+ * We intentionally use argv-only flag detection (not Commander metadata) because
+ * Commander hasn't parsed yet at this point. This mirrors the fallback in
+ * `getCommandJsonMode` and `tryRouteCli`.
+ *
+ * Help / version invocations deliberately keep stdout logging so users see
+ * the expected text output.
+ */
+export function shouldHoistRouteLogsToStderr(argv: string[]): boolean {
+  if (!hasFlag(argv, "--json")) {
+    return false;
+  }
+  const invocation = resolveCliArgvInvocation(argv);
+  if (invocation.hasHelpOrVersion) {
+    return false;
+  }
+  return true;
 }
 
 export function resolveMissingPluginCommandMessage(
@@ -187,6 +220,17 @@ export async function runCli(argv: string[] = process.argv) {
 
     if (await tryRouteCli(normalizedArgv)) {
       return;
+    }
+
+    // Hoist stderr routing for --json invocations BEFORE any plugin code can run.
+    // Plugin CLI command discovery below invokes loadOpenClawPlugins(), which
+    // calls plugin register() handlers; those handlers log via api.logger.info
+    // and would otherwise write to stdout (the channel --json consumers parse
+    // as the result envelope). The normal preaction hook would set this flag,
+    // but only after Commander starts parsing, which is too late. See
+    // shouldHoistRouteLogsToStderr for details.
+    if (shouldHoistRouteLogsToStderr(normalizedArgv)) {
+      routeLogsToStderr();
     }
 
     // Capture all console output into structured logs while keeping stdout/stderr behavior.

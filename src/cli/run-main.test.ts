@@ -3,6 +3,7 @@ import {
   rewriteUpdateFlagArgv,
   resolveMissingPluginCommandMessage,
   shouldEnsureCliPath,
+  shouldHoistRouteLogsToStderr,
   shouldUseRootHelpFastPath,
 } from "./run-main.js";
 
@@ -147,5 +148,39 @@ describe("resolveMissingPluginCommandMessage", () => {
     });
     expect(message).toContain("plugins.entries.memory-core.enabled=false");
     expect(message).not.toContain("runtime slash command");
+  });
+});
+
+describe("shouldHoistRouteLogsToStderr", () => {
+  it("returns true when --json is present for a subcommand", () => {
+    expect(
+      shouldHoistRouteLogsToStderr([
+        "node",
+        "entry.js",
+        "agent",
+        "--agent",
+        "rick-em",
+        "--message",
+        "ping",
+        "--json",
+      ]),
+    ).toBe(true);
+  });
+
+  it("returns false when --json is absent", () => {
+    expect(shouldHoistRouteLogsToStderr(["node", "entry.js", "agent", "--message", "ping"])).toBe(
+      false,
+    );
+  });
+
+  it("returns false for help invocations even when --json is set", () => {
+    expect(shouldHoistRouteLogsToStderr(["node", "entry.js", "--help", "--json"])).toBe(false);
+    expect(shouldHoistRouteLogsToStderr(["node", "entry.js", "agent", "--help", "--json"])).toBe(
+      false,
+    );
+  });
+
+  it("returns false for version invocations even when --json is set", () => {
+    expect(shouldHoistRouteLogsToStderr(["node", "entry.js", "--version", "--json"])).toBe(false);
   });
 });

@@ -153,7 +153,9 @@ class Mem0Client {
   }
 
   private async ensureHealthy(): Promise<void> {
-    if (this.healthChecked) return;
+    if (this.healthChecked) {
+      return;
+    }
 
     const result = await this.checkHealth();
     if (result.healthy) {
@@ -557,13 +559,17 @@ export default {
     if (config.autoRecall) {
       api.on("before_agent_start", async (event, ctx) => {
         const prompt = event.prompt || "";
-        if (!prompt.trim()) return;
+        if (!prompt.trim()) {
+          return undefined;
+        }
 
         const userId = resolveUserId(ctx, config.userId);
         const memories = await client.search(prompt, userId, config.recallLimit);
         const relevant = memories.filter((m) => (m.score || 0) >= config.recallThreshold);
 
-        if (relevant.length === 0) return;
+        if (relevant.length === 0) {
+          return undefined;
+        }
 
         const formatted = relevant
           .map((m) => `- ${m.memory} [score: ${m.score?.toFixed(2)}]`)
@@ -585,10 +591,14 @@ export default {
         const pairs: Array<{ role: string; content: string }> = [];
 
         for (const msg of messages) {
-          if (!msg || typeof msg !== "object") continue;
+          if (!msg || typeof msg !== "object") {
+            continue;
+          }
           const msgObj = msg as Record<string, unknown>;
 
-          if (msgObj.role !== "user" && msgObj.role !== "assistant") continue;
+          if (msgObj.role !== "user" && msgObj.role !== "assistant") {
+            continue;
+          }
 
           // Extract text: string for user messages, array of TextContent for assistant
           let text: string;
@@ -597,17 +607,21 @@ export default {
           } else if (Array.isArray(msgObj.content)) {
             text = (msgObj.content as Array<Record<string, unknown>>)
               .filter((c) => c.type === "text")
-              .map((c) => String(c.text ?? ""))
+              .map((c) => (typeof c.text === "string" ? c.text : ""))
               .join("\n");
           } else {
             continue;
           }
 
           // Skip recalled memory context to prevent feedback loops
-          if (text.includes("<relevant-memories>")) continue;
+          if (text.includes("<relevant-memories>")) {
+            continue;
+          }
 
           // Only capture substantial messages
-          if (text.trim().length < 50) continue;
+          if (text.trim().length < 50) {
+            continue;
+          }
 
           // Skip messages containing secrets/credentials
           if (containsSecrets(text)) {
@@ -615,10 +629,12 @@ export default {
             continue;
           }
 
-          pairs.push({ role: String(msgObj.role), content: text });
+          pairs.push({ role: msgObj.role, content: text });
         }
 
-        if (pairs.length === 0) return;
+        if (pairs.length === 0) {
+          return;
+        }
 
         // Send as a conversation to Mem0 so it can extract facts from context
         try {

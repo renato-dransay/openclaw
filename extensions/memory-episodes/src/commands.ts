@@ -13,9 +13,8 @@ import type { EpisodesConfig } from "./config.js";
 import type { EpisodeDb, EpisodeSearchResult } from "./db.js";
 import type { EmbeddingConfig } from "./embedding.js";
 import { embed } from "./embedding.js";
-import { generateEpisode, MIN_MESSAGES_FOR_EPISODE } from "./episode-generator.js";
 import type { ExtractionConfig } from "./episode-generator.js";
-import { formatEpisodeDetail, formatMemoryDashboard, formatRecallResults } from "./format.js";
+import { formatMemoryDashboard, formatRecallResults } from "./format.js";
 import type { Mem0Client } from "./mem0-client.js";
 
 type CommandDeps = {
@@ -336,7 +335,9 @@ export function registerCommands(api: OpenClawPluginApi, deps: CommandDeps): voi
 
         for (const agent of agentDirs) {
           const sessionsDir = path.join(agentsDir, agent.name, "sessions");
-          if (!fs.existsSync(sessionsDir)) continue;
+          if (!fs.existsSync(sessionsDir)) {
+            continue;
+          }
 
           const files = fs
             .readdirSync(sessionsDir)

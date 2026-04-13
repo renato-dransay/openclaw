@@ -26,7 +26,6 @@ import type { OpenClawConfig } from "../config/config.js";
 import { logWarn } from "../logger.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { redactSensitiveUrlLikeString } from "../shared/net/redact-sensitive-url.js";
-import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { loadEmbeddedPiMcpConfig } from "./embedded-pi-mcp.js";
 import { isMcpConfigRecord } from "./mcp-config-shared.js";
 import { resolveMcpTransport } from "./mcp-transport.js";

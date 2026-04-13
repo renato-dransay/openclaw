@@ -98,11 +98,11 @@ function optionalBoolean(obj: Record<string, unknown>, key: string): boolean | u
 
 export function parseConfig(value: unknown): EpisodesConfig {
   assertIsObject(value, "episodes config");
-  const cfg = value as Record<string, unknown>;
+  const cfg = value;
 
   // postgres (required)
   assertIsObject(cfg.postgres, "postgres config");
-  const pg = cfg.postgres as Record<string, unknown>;
+  const pg = cfg.postgres;
   if (typeof pg.connectionString !== "string") {
     throw new Error("postgres.connectionString is required");
   }
@@ -139,7 +139,7 @@ export function parseConfig(value: unknown): EpisodesConfig {
 
   return {
     postgres: {
-      connectionString: resolveEnvVars(pg.connectionString as string),
+      connectionString: resolveEnvVars(pg.connectionString),
     },
     embedding: {
       baseUrl: optionalString(emb, "baseUrl")

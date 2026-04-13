@@ -226,6 +226,10 @@ export class ModelHealthTracker {
         return false;
       case "open":
         return false;
+      default: {
+        const _exhaustive: never = entry.circuitState;
+        return false;
+      }
     }
   }
 

@@ -5,7 +5,7 @@
  * Graceful degradation: callers should catch and log errors rather than crash.
  */
 
-import type { Pool as PgPool, PoolClient } from "pg";
+import type { Pool as PgPool } from "pg";
 
 // Lazy-load pg to avoid import failures when the package is optional
 let pgImportPromise: Promise<typeof import("pg")> | null = null;

@@ -112,9 +112,6 @@ function buildBundledHookEntries(): Record<string, string> {
 }
 
 const bundledHookEntries = buildBundledHookEntries();
-const bundledPluginRoot = (pluginId: string) => ["extensions", pluginId].join("/");
-const bundledPluginFile = (pluginId: string, relativePath: string) =>
-  `${bundledPluginRoot(pluginId)}/${relativePath}`;
 const explicitNeverBundleDependencies = [
   "@lancedb/lancedb",
   "@matrix-org/matrix-sdk-crypto-nodejs",

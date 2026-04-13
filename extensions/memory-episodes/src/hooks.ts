@@ -113,7 +113,7 @@ export function registerHooks(api: OpenClawPluginApi, deps: HookDeps): void {
   // =========================================================================
   api.on("before_prompt_build", async (event, ctx) => {
     if (!event.prompt || event.prompt.length < 5) {
-      return;
+      return undefined;
     }
 
     const agentId = ctx.agentId ?? "unknown";
@@ -137,7 +137,7 @@ export function registerHooks(api: OpenClawPluginApi, deps: HookDeps): void {
 
       const contextStr = formatEpisodeContext(continuation, semanticResults);
       if (!contextStr) {
-        return;
+        return undefined;
       }
 
       api.logger.info?.(
@@ -147,6 +147,7 @@ export function registerHooks(api: OpenClawPluginApi, deps: HookDeps): void {
       return { prependContext: contextStr };
     } catch (err) {
       api.logger.warn(`memory-episodes: context injection failed: ${String(err)}`);
+      return undefined;
     }
   });
 }

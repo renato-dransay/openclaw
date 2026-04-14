@@ -7,37 +7,71 @@ description: Sync the local fork with upstream openclaw, rebuild, restart all se
 
 Use this skill to sync the local repo with upstream, rebuild, and redeploy. Follow every step in order. Do not skip steps. If any step fails, stop and report.
 
+## Branch model
+
+The fork uses a three-branch flow:
+
+```
+upstream/main  →  main  →  dransay  →  origin/dransay
+```
+
+- `main` is a clean local mirror of `upstream/main`. **Never push `main` to `origin`.**
+- `dransay` is the working branch that carries fork-only commits (e.g. Mattermost slash-owner serialization, follow-redirects exclude, host-aware merge fixes). Sync runs here and pushes here.
+- `origin/dransay` is the only branch this skill pushes to.
+
 ## Steps
 
-### 1. Commit local changes (if any)
+### 1. Commit local changes on dransay (if any)
 
-Check `git status`. If there are uncommitted changes, commit them before proceeding. Use `--no-verify` only if pre-commit failures are pre-existing and unrelated to the changes.
+Start on `dransay` (the default working branch). Check `git status`. If there are uncommitted changes, commit them via `scripts/committer "<msg>" <files...>` before proceeding. Use `--no-verify` only if pre-commit failures are pre-existing and unrelated to the changes.
 
-### 2. Fetch and merge upstream
+### 2. Sync upstream → main
 
 ```sh
+git checkout main
 git fetch upstream
-git merge upstream/main -X ours
+git merge upstream/main -X ours --no-edit
 ```
 
 If there are conflicts even with `-X ours`, stop and report to the user. Do not force-resolve.
 
-### 3. Install dependencies
+### 3. Merge main → dransay
+
+```sh
+git checkout dransay
+git merge main -X ours --no-edit
+```
+
+`-X ours` keeps fork-side resolutions when both branches touch the same line. **This regularly drops new upstream imports/exports** — after this step, expect to fix tsgo errors caused by missing imports that landed on `main` but were lost in the merge. Resolve them in the same commit as other unblockers (step 6 below).
+
+### 4. Install dependencies
 
 ```sh
 pnpm install
 ```
 
-### 4. Rebuild
+If install fails on `ERR_PNPM_NO_MATURE_MATCHING_VERSION` for a freshly-pinned upstream override (e.g. `follow-redirects@1.16.0` released < 48 h ago), add the exact pin to `pnpm-workspace.yaml`'s `minimumReleaseAgeExclude` list — mirror the existing `axios@1.15.0` style — and retry. This is a fork-side unblocker that's safe to land because upstream already pinned the version intentionally; commit it together with any other sync unblockers in step 6.
+
+### 5. Rebuild
 
 ```sh
 pnpm build
 pnpm ui:build
 ```
 
-Both must succeed. If `ui:build` fails on missing deps, rerun `pnpm install` and retry once.
+Both must succeed. If `ui:build` fails on missing deps, rerun `pnpm install` and retry once. `pnpm build` regenerates `src/canvas-host/a2ui/.bundle.hash`; commit the hash as its **own** commit (do not bundle it with other changes) per the repo CLAUDE.md A2UI rule.
 
-### 5. Ensure Docker/OrbStack is running (for Mattermost + memory stack only)
+### 6. Commit any sync unblockers
+
+Run `pnpm check` (or let the committer hook run it) to surface anything broken by the merge. Common findings on dransay after an upstream sync:
+
+- **Lost imports** from `-X ours` — e.g. `tsgo` reports `Cannot find name 'X'` because a new upstream import landed on `main` but the merge kept the older dransay-side line. Fix by re-adding the import and rerunning `pnpm tsgo`.
+- **Runtime import cycles** flagged by `pnpm check:import-cycles` — usually a fork-side re-export in `extensions/<plugin>/runtime-api.ts` that pulls a heavy graph back through itself. Prefer a thin barrel (e.g. `extensions/mattermost/slash-route-api.ts`) over the runtime barrel for lazy-loaded entry points.
+- **`minimumReleaseAge` exclude misses** (see step 4).
+
+Group these into a single commit on dransay (e.g. `build: unblock dransay sync after upstream merge`). The `.bundle.hash` from step 5 stays in its own follow-up commit.
+
+### 7. Ensure Docker/OrbStack is running (for Mattermost + memory stack only)
 
 ```sh
 orb start  # or: open -a OrbStack
@@ -45,7 +79,7 @@ orb start  # or: open -a OrbStack
 
 Wait until `docker info` succeeds.
 
-### 6. Start Mattermost (if not running)
+### 8. Start Mattermost (if not running)
 
 ```sh
 cd /Users/renas/Projects/mattermost/deploy && docker compose up -d
@@ -53,13 +87,13 @@ cd /Users/renas/Projects/mattermost/deploy && docker compose up -d
 
 Wait until `curl -s http://localhost:30065/api/v4/system/ping` returns 200.
 
-### 7. Start memory stack (if not running)
+### 9. Start memory stack (if not running)
 
 ```sh
 docker compose -f docker-compose.memory.yml up -d
 ```
 
-### 8. Restart the gateway (host, via launchd)
+### 10. Restart the gateway (host, via launchd)
 
 ```sh
 openclaw gateway restart
@@ -69,7 +103,7 @@ openclaw gateway restart
 Do NOT run `docker compose -f docker-compose.yml up -d` or `docker build -t openclaw:local .` for the gateway.
 Docker is only used for Mattermost and the memory stack. Running the gateway in Docker breaks agent access to host tools (gh, git, etc.).
 
-### 9. Restart the consumer (Reactor + workflow engine)
+### 11. Restart the consumer (Reactor + workflow engine)
 
 ```sh
 launchctl kickstart -k gui/501/com.openclaw.consumer
@@ -83,7 +117,7 @@ tail -5 ~/.openclaw/runtime/logs/runtime.log
 
 You should see "Reactor started — polling every 60s" and "Consumer started". If not, check for PID lock issues (`rm -f ~/.openclaw/runtime/consumer.pid` and retry).
 
-### 10. Verify everything
+### 12. Verify everything
 
 Run all checks and report results in a table:
 
@@ -97,11 +131,13 @@ Run all checks and report results in a table:
 
 If any check fails, investigate and fix before reporting success.
 
-### 11. Push
+### 13. Push dransay to origin
 
 ```sh
-git push origin main
+git push origin dransay
 ```
+
+**Only `dransay` is pushed.** `main` stays local as a clean upstream mirror — never `git push origin main` from this skill.
 
 ## Notes
 

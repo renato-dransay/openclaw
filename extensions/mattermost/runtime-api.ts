@@ -87,5 +87,8 @@ export {
 } from "openclaw/plugin-sdk/media-runtime";
 export { normalizeProviderId } from "openclaw/plugin-sdk/provider-model-shared";
 export { getPluginCommandSpecs } from "openclaw/plugin-sdk/mattermost";
-export { registerSlashCommandRoute } from "./src/mattermost/slash-state.js";
+// `registerSlashCommandRoute` intentionally NOT re-exported here: it would
+// pull `slash-state` → `slash-http` → `model-picker` → `src/mattermost/runtime-api`
+// → back to this barrel, creating a runtime cycle. The bundled-channel entry
+// (`index.ts`) loads it lazily via the `slash-route-api.ts` thin barrel.
 export { setMattermostRuntime } from "./src/runtime.js";

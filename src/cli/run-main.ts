@@ -12,6 +12,7 @@ import { ensureGlobalUndiciEnvProxyDispatcher } from "../infra/net/undici-global
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import { assertSupportedRuntime } from "../infra/runtime-guard.js";
 import { enableConsoleCapture, routeLogsToStderr } from "../logging.js";
+import type { PluginManifestCommandAliasRegistry } from "../plugins/manifest-command-aliases.js";
 import { resolveManifestCommandAliasOwner } from "../plugins/manifest-command-aliases.runtime.js";
 import { hasMemoryRuntime } from "../plugins/memory-state.js";
 import { maybeWarnAboutDebugProxyCoverage } from "../proxy-capture/coverage.js";

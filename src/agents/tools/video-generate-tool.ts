@@ -1,8 +1,9 @@
 import { Type } from "@sinclair/typebox";
-import type { OpenClawConfig } from "../../config/config.js";
 import { loadConfig } from "../../config/config.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { resolveConfiguredMediaMaxBytes } from "../../media/configured-max-bytes.js";
 import { saveMediaBuffer } from "../../media/store.js";
 import { loadWebMedia } from "../../media/web-media.js";
 import { readSnakeCaseParamRaw } from "../../param-key.js";
@@ -535,6 +536,10 @@ type ExecutedVideoGeneration = {
   provider: string;
   model: string;
   savedPaths: string[];
+  /** URLs of url-only assets that were not saved locally. */
+  urlOnlyUrls: string[];
+  /** Total generated video count, including url-only assets. */
+  count: number;
   contentText: string;
   details: Record<string, unknown>;
   wakeResult: string;
@@ -587,17 +592,39 @@ async function executeVideoGenerationJob(params: {
     });
   }
 
+  const urlOnlyVideos: Array<{ url: string; mimeType: string; fileName?: string }> = [];
+  const bufferVideos: Array<(typeof result.videos)[number] & { buffer: Buffer }> = [];
+  for (const video of result.videos) {
+    if (video.buffer) {
+      bufferVideos.push(video as (typeof result.videos)[number] & { buffer: Buffer });
+      continue;
+    }
+    if (video.url) {
+      urlOnlyVideos.push({
+        url: video.url,
+        mimeType: video.mimeType,
+        fileName: video.fileName,
+      });
+      continue;
+    }
+    throw new Error(
+      `Provider ${result.provider} returned a video asset with neither buffer nor url — cannot deliver.`,
+    );
+  }
+
+  const configuredMediaMaxBytes = resolveConfiguredMediaMaxBytes(params.effectiveCfg);
   const savedVideos = await Promise.all(
-    result.videos.map((video) =>
+    bufferVideos.map((video) =>
       saveMediaBuffer(
         video.buffer,
         video.mimeType,
         "tool-video-generation",
-        undefined,
+        configuredMediaMaxBytes,
         params.filename || video.fileName,
       ),
     ),
   );
+  const totalCount = savedVideos.length + urlOnlyVideos.length;
   const requestedDurationSeconds =
     result.normalization?.durationSeconds?.requested ??
     (typeof result.metadata?.requestedDurationSeconds === "number" &&
@@ -646,8 +673,12 @@ async function executeVideoGenerationJob(params: {
       typeof result.metadata?.requestedSize === "string" &&
       result.metadata.requestedSize === params.size &&
       Boolean(normalizedAspectRatio));
+  const allMediaUrls = [
+    ...savedVideos.map((video) => video.path),
+    ...urlOnlyVideos.map((video) => video.url),
+  ];
   const lines = [
-    `Generated ${savedVideos.length} video${savedVideos.length === 1 ? "" : "s"} with ${result.provider}/${result.model}.`,
+    `Generated ${totalCount} video${totalCount === 1 ? "" : "s"} with ${result.provider}/${result.model}.`,
     ...(warning ? [`Warning: ${warning}`] : []),
     typeof requestedDurationSeconds === "number" &&
     typeof normalizedDurationSeconds === "number" &&
@@ -655,22 +686,25 @@ async function executeVideoGenerationJob(params: {
       ? `Duration normalized: requested ${requestedDurationSeconds}s; used ${normalizedDurationSeconds}s.`
       : null,
     ...savedVideos.map((video) => `MEDIA:${video.path}`),
+    ...urlOnlyVideos.map((video) => `MEDIA:${video.url}`),
   ].filter((entry): entry is string => Boolean(entry));
 
   return {
     provider: result.provider,
     model: result.model,
     savedPaths: savedVideos.map((video) => video.path),
+    urlOnlyUrls: urlOnlyVideos.map((video) => video.url),
+    count: totalCount,
     contentText: lines.join("\n"),
     wakeResult: lines.join("\n"),
     details: {
       provider: result.provider,
       model: result.model,
-      count: savedVideos.length,
+      count: totalCount,
       media: {
-        mediaUrls: savedVideos.map((video) => video.path),
+        mediaUrls: allMediaUrls,
       },
-      paths: savedVideos.map((video) => video.path),
+      paths: allMediaUrls,
       ...buildTaskRunDetails(params.taskHandle),
       ...buildMediaReferenceDetails({
         entries: params.loadedReferenceImages,
@@ -931,7 +965,7 @@ export function createVideoGenerateTool(options?: {
               handle: taskHandle,
               provider: executed.provider,
               model: executed.model,
-              count: executed.savedPaths.length,
+              count: executed.count,
               paths: executed.savedPaths,
             });
             try {
@@ -941,7 +975,7 @@ export function createVideoGenerateTool(options?: {
                 status: "ok",
                 statusLabel: "completed successfully",
                 result: executed.wakeResult,
-                mediaUrls: executed.savedPaths,
+                mediaUrls: [...executed.savedPaths, ...executed.urlOnlyUrls],
               });
             } catch (error) {
               log.warn("Video generation completion wake failed after successful generation", {
@@ -1025,7 +1059,7 @@ export function createVideoGenerateTool(options?: {
           handle: taskHandle,
           provider: executed.provider,
           model: executed.model,
-          count: executed.savedPaths.length,
+          count: executed.count,
           paths: executed.savedPaths,
         });
 

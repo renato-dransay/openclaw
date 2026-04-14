@@ -3,16 +3,22 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { CommanderError } from "commander";
-import type { OpenClawConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizeEnv } from "../infra/env.js";
 import { formatUncaughtError } from "../infra/errors.js";
 import { isMainModule } from "../infra/is-main.js";
+import { ensureGlobalUndiciEnvProxyDispatcher } from "../infra/net/undici-global-dispatcher.js";
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import { assertSupportedRuntime } from "../infra/runtime-guard.js";
 import { enableConsoleCapture, routeLogsToStderr } from "../logging.js";
 import { resolveManifestCommandAliasOwner } from "../plugins/manifest-command-aliases.runtime.js";
 import { hasMemoryRuntime } from "../plugins/memory-state.js";
+import { maybeWarnAboutDebugProxyCoverage } from "../proxy-capture/coverage.js";
+import {
+  finalizeDebugProxyCapture,
+  initializeDebugProxyCapture,
+} from "../proxy-capture/runtime.js";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
@@ -100,6 +106,7 @@ export function shouldHoistRouteLogsToStderr(argv: string[]): boolean {
 export function resolveMissingPluginCommandMessage(
   pluginId: string,
   config?: OpenClawConfig,
+  options?: { registry?: PluginManifestCommandAliasRegistry },
 ): string | null {
   const normalizedPluginId = normalizeLowercaseStringOrEmpty(pluginId);
   if (!normalizedPluginId) {
@@ -115,6 +122,7 @@ export function resolveMissingPluginCommandMessage(
   const commandAlias = resolveManifestCommandAliasOwner({
     command: normalizedPluginId,
     config,
+    registry: options?.registry,
   });
   const parentPluginId = commandAlias?.pluginId;
   if (parentPluginId) {
@@ -145,6 +153,9 @@ export function resolveMissingPluginCommandMessage(
   }
 
   if (allow.length > 0 && !allow.includes(normalizedPluginId)) {
+    if (parentPluginId && allow.includes(parentPluginId)) {
+      return null;
+    }
     return (
       `The \`openclaw ${normalizedPluginId}\` command is unavailable because ` +
       `\`plugins.allow\` excludes "${normalizedPluginId}". Add "${normalizedPluginId}" to ` +
@@ -201,6 +212,12 @@ export async function runCli(argv: string[] = process.argv) {
     loadCliDotEnv({ quiet: true });
   }
   normalizeEnv();
+  initializeDebugProxyCapture("cli");
+  process.once("exit", () => {
+    finalizeDebugProxyCapture();
+  });
+  ensureGlobalUndiciEnvProxyDispatcher();
+  maybeWarnAboutDebugProxyCoverage();
   if (shouldEnsureCliPath(normalizedArgv)) {
     ensureOpenClawCliOnPath();
   }

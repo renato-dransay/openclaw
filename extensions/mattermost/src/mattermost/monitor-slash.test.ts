@@ -9,6 +9,9 @@ const registerSlashCommands = vi.hoisted(() => vi.fn());
 const resolveCallbackUrl = vi.hoisted(() => vi.fn());
 const resolveSlashCommandConfig = vi.hoisted(() => vi.fn());
 const activateSlashCommands = vi.hoisted(() => vi.fn());
+const tryClaimSlashCommandOwner = vi.hoisted(() => vi.fn(() => true));
+const getSlashCommandOwner = vi.hoisted(() => vi.fn(() => null));
+const releaseSlashCommandOwner = vi.hoisted(() => vi.fn());
 
 vi.mock("./runtime-api.js", () => ({
   listSkillCommandsForAgents,
@@ -37,6 +40,9 @@ vi.mock("./slash-commands.js", () => ({
 
 vi.mock("./slash-state.js", () => ({
   activateSlashCommands,
+  tryClaimSlashCommandOwner,
+  getSlashCommandOwner,
+  releaseSlashCommandOwner,
 }));
 
 describe("mattermost monitor slash", () => {

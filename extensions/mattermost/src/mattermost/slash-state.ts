@@ -34,6 +34,39 @@ export type SlashCommandAccountState = {
 /** Map from accountId → per-account slash command state. */
 const accountStates = new Map<string, SlashCommandAccountState>();
 
+/**
+ * Synchronous "slash-command owner" claim.
+ *
+ * Mattermost enforces one slash-command record per (trigger, team), so only
+ * one OpenClaw account should register slash commands on behalf of all bots.
+ * Since monitors run concurrently and their registration paths contain
+ * awaits, we can't rely on `accountStates` alone to decide who goes first —
+ * every monitor would see an empty map before the first activation lands.
+ *
+ * Instead, `tryClaimSlashCommandOwner` is synchronous and first-come wins:
+ * the first account to call it gets `true`, every subsequent account that
+ * isn't the same owner gets `false` and must skip registration.
+ */
+let slashCommandOwner: string | null = null;
+
+export function tryClaimSlashCommandOwner(accountId: string): boolean {
+  if (slashCommandOwner === null) {
+    slashCommandOwner = accountId;
+    return true;
+  }
+  return slashCommandOwner === accountId;
+}
+
+export function getSlashCommandOwner(): string | null {
+  return slashCommandOwner;
+}
+
+export function releaseSlashCommandOwner(accountId: string): void {
+  if (slashCommandOwner === accountId) {
+    slashCommandOwner = null;
+  }
+}
+
 export function resolveSlashHandlerForToken(token: string): {
   kind: "none" | "single" | "ambiguous";
   handler?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -138,6 +171,7 @@ export function deactivateSlashCommands(accountId?: string) {
       state.handler = null;
       accountStates.delete(accountId);
     }
+    releaseSlashCommandOwner(accountId);
   } else {
     // Deactivate all accounts (full shutdown)
     for (const [, state] of accountStates) {
@@ -146,6 +180,7 @@ export function deactivateSlashCommands(accountId?: string) {
       state.handler = null;
     }
     accountStates.clear();
+    slashCommandOwner = null;
   }
 }
 
@@ -274,17 +309,52 @@ export function registerSlashCommandRoute(api: OpenClawPluginApi) {
     }
 
     if (match.kind === "ambiguous") {
-      api.logger.warn?.(
-        `mattermost: slash callback token matched multiple accounts (${match.accountIds?.join(", ")})`,
+      // Mattermost enforces one slash-command record per trigger per team, so
+      // when multiple bot accounts each activate slash commands they end up
+      // sharing the same (trigger, token) pair. That is expected; the token
+      // alone cannot identify the target account. Pick the first matched
+      // handler — any agent can service the command, and per-request routing
+      // (e.g. DM bot resolution) happens further down the handler pipeline.
+      const accountIds = match.accountIds ?? [];
+      let picked: {
+        accountId: string;
+        handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+      } | null = null;
+      for (const accountId of accountIds) {
+        const state = accountStates.get(accountId);
+        if (state?.handler) {
+          picked = { accountId, handler: state.handler };
+          break;
+        }
+      }
+      if (!picked) {
+        api.logger.warn?.(
+          `mattermost: slash callback token matched accounts (${accountIds.join(", ")}) but none had an active handler`,
+        );
+        res.statusCode = 503;
+        res.setHeader("Content-Type", "application/json; charset=utf-8");
+        res.end(
+          JSON.stringify({
+            response_type: "ephemeral",
+            text: "Slash commands are not yet initialized. Please try again in a moment.",
+          }),
+        );
+        return;
+      }
+      api.logger.info?.(
+        `mattermost: slash callback token matched ${accountIds.length} accounts; dispatching to ${picked.accountId}`,
       );
-      res.statusCode = 409;
-      res.setHeader("Content-Type", "application/json; charset=utf-8");
-      res.end(
-        JSON.stringify({
-          response_type: "ephemeral",
-          text: "Conflict: command token is not unique across accounts.",
-        }),
-      );
+      const { Readable: AmbReadable } = await import("node:stream");
+      const ambReq = new AmbReadable({
+        read() {
+          this.push(Buffer.from(bodyStr, "utf8"));
+          this.push(null);
+        },
+      }) as IncomingMessage;
+      ambReq.method = req.method;
+      ambReq.url = req.url;
+      ambReq.headers = req.headers;
+      await picked.handler(ambReq, res);
       return;
     }
 

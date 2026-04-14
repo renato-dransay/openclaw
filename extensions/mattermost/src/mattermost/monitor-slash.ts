@@ -21,7 +21,12 @@ import {
   type MattermostRegisteredCommand,
   type MattermostSlashCommandConfig,
 } from "./slash-commands.js";
-import { activateSlashCommands } from "./slash-state.js";
+import {
+  activateSlashCommands,
+  getSlashCommandOwner,
+  releaseSlashCommandOwner,
+  tryClaimSlashCommandOwner,
+} from "./slash-state.js";
 
 function isLoopbackHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
@@ -179,6 +184,23 @@ export async function registerMattermostMonitorSlashCommands(params: {
     return;
   }
 
+  // Mattermost enforces one slash-command record per (trigger, team), so when
+  // multiple bot accounts share a team they would all try to register the same
+  // trigger and end up sharing one (trigger, token) pair. Routing the callback
+  // back to a specific account by token alone then becomes ambiguous. Elect a
+  // single account to own slash-command registration on behalf of all bots via
+  // first-come-first-serve. The claim is synchronous so concurrent monitors
+  // resolve deterministically — whichever monitor enters this block first wins
+  // even though the registration paths contain awaits. Per-request handling
+  // still resolves the target agent via channel/DM context further down the
+  // pipeline.
+  if (!tryClaimSlashCommandOwner(params.account.accountId)) {
+    params.runtime.log?.(
+      `mattermost: skipping slash command registration for account ${params.account.accountId} (owner is ${getSlashCommandOwner()})`,
+    );
+    return;
+  }
+
   try {
     const teams = await fetchMattermostUserTeams(params.client, params.botUserId);
     const envPort = parseStrictPositiveInteger(process.env.OPENCLAW_GATEWAY_PORT?.trim());
@@ -215,6 +237,7 @@ export async function registerMattermostMonitorSlashCommands(params: {
       params.runtime.error?.(
         "mattermost: native slash commands enabled but no commands could be registered; keeping slash callbacks inactive",
       );
+      releaseSlashCommandOwner(params.account.accountId);
       return;
     }
 
@@ -299,5 +322,6 @@ export async function registerMattermostMonitorSlashCommands(params: {
     }, 5_000);
   } catch (err) {
     params.runtime.error?.(`mattermost: failed to register slash commands: ${String(err)}`);
+    releaseSlashCommandOwner(params.account.accountId);
   }
 }

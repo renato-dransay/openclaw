@@ -6,6 +6,7 @@ import {
   listBundledPluginRuntimeDependencies,
   NON_PACKAGED_BUNDLED_PLUGIN_DIRS,
 } from "./scripts/lib/bundled-plugin-build-entries.mjs";
+import { bundledPluginFile } from "./scripts/lib/bundled-plugin-paths.mjs";
 import { buildPluginSdkEntrySources } from "./scripts/lib/plugin-sdk-entries.mjs";
 
 type InputOptionsFactory = Extract<NonNullable<UserConfig["inputOptions"]>, Function>;

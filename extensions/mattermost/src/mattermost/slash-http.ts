@@ -230,7 +230,8 @@ async function authorizeSlashInvocation(params: {
  * from the Mattermost server when a user invokes a registered slash command.
  */
 export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
-  const { account, cfg, runtime, commandTokens, triggerMap, botUserIdMap, log } = params;
+  const { account, cfg, runtime, commandTokens, triggerMap, botUserIdMap, log, bodyTimeoutMs } =
+    params;
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (req.method !== "POST") {

@@ -6,7 +6,6 @@ const TEST_QA_RUNNER = {
   pluginId: "qa-runner-test",
   commandName: "runner-test",
   description: "Run the test live QA lane",
-  npmSpec: "@openclaw/qa-runner-test",
 } as const;
 
 function createAvailableQaRunnerContribution() {
@@ -21,16 +20,6 @@ function createAvailableQaRunnerContribution() {
       }),
     },
   } satisfies QaRunnerCliContribution;
-}
-
-function createMissingQaRunnerContribution(): QaRunnerCliContribution {
-  return {
-    pluginId: TEST_QA_RUNNER.pluginId,
-    commandName: TEST_QA_RUNNER.commandName,
-    description: TEST_QA_RUNNER.description,
-    status: "missing",
-    npmSpec: TEST_QA_RUNNER.npmSpec,
-  };
 }
 
 function createBlockedQaRunnerContribution(): QaRunnerCliContribution {
@@ -55,11 +44,15 @@ const {
   runQaCredentialsAddCommand,
   runQaCredentialsListCommand,
   runQaCredentialsRemoveCommand,
+  runQaCoverageReportCommand,
+  runQaProviderServerCommand,
   runQaTelegramCommand,
 } = vi.hoisted(() => ({
   runQaCredentialsAddCommand: vi.fn(),
   runQaCredentialsListCommand: vi.fn(),
   runQaCredentialsRemoveCommand: vi.fn(),
+  runQaCoverageReportCommand: vi.fn(),
+  runQaProviderServerCommand: vi.fn(),
   runQaTelegramCommand: vi.fn(),
 }));
 
@@ -81,6 +74,8 @@ vi.mock("./cli.runtime.js", () => ({
   runQaCredentialsAddCommand,
   runQaCredentialsListCommand,
   runQaCredentialsRemoveCommand,
+  runQaCoverageReportCommand,
+  runQaProviderServerCommand,
 }));
 
 import { registerQaLabCli } from "./cli.js";
@@ -93,6 +88,8 @@ describe("qa cli registration", () => {
     runQaCredentialsAddCommand.mockReset();
     runQaCredentialsListCommand.mockReset();
     runQaCredentialsRemoveCommand.mockReset();
+    runQaCoverageReportCommand.mockReset();
+    runQaProviderServerCommand.mockReset();
     runQaTelegramCommand.mockReset();
     listQaRunnerCliContributions
       .mockReset()
@@ -108,8 +105,28 @@ describe("qa cli registration", () => {
     const qa = program.commands.find((command) => command.name() === "qa");
     expect(qa).toBeDefined();
     expect(qa?.commands.map((command) => command.name())).toEqual(
-      expect.arrayContaining([TEST_QA_RUNNER.commandName, "telegram", "credentials"]),
+      expect.arrayContaining([TEST_QA_RUNNER.commandName, "telegram", "credentials", "coverage"]),
     );
+  });
+
+  it("routes coverage report flags into the qa runtime command", async () => {
+    await program.parseAsync([
+      "node",
+      "openclaw",
+      "qa",
+      "coverage",
+      "--repo-root",
+      "/tmp/openclaw-repo",
+      "--output",
+      ".artifacts/qa-coverage.md",
+      "--json",
+    ]);
+
+    expect(runQaCoverageReportCommand).toHaveBeenCalledWith({
+      repoRoot: "/tmp/openclaw-repo",
+      output: ".artifacts/qa-coverage.md",
+      json: true,
+    });
   });
 
   it("delegates discovered qa runner registration through the generic host seam", () => {
@@ -127,14 +144,18 @@ describe("qa cli registration", () => {
     );
   });
 
-  it("shows an install hint when a discovered runner plugin is unavailable", async () => {
-    listQaRunnerCliContributions.mockReset().mockReturnValue([createMissingQaRunnerContribution()]);
-    const missingProgram = new Command();
-    registerQaLabCli(missingProgram);
+  it("registers standalone provider server commands from the provider registry", async () => {
+    const qa = program.commands.find((command) => command.name() === "qa");
+    expect(qa?.commands.map((command) => command.name())).toEqual(
+      expect.arrayContaining(["mock-openai", "aimock"]),
+    );
 
-    await expect(
-      missingProgram.parseAsync(["node", "openclaw", "qa", TEST_QA_RUNNER.commandName]),
-    ).rejects.toThrow(`openclaw plugins install ${TEST_QA_RUNNER.npmSpec}`);
+    await program.parseAsync(["node", "openclaw", "qa", "aimock", "--port", "44080"]);
+
+    expect(runQaProviderServerCommand).toHaveBeenCalledWith("aimock", {
+      host: "127.0.0.1",
+      port: 44080,
+    });
   });
 
   it("shows an enable hint when a discovered runner plugin is installed but blocked", async () => {

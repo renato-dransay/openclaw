@@ -1,8 +1,11 @@
 import type { Command } from "commander";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import { loadPluginManifestRegistry } from "../plugins/manifest-registry.js";
-import { listBundledQaRunnerCatalog } from "../plugins/qa-runner-catalog.js";
-import { tryLoadActivatedBundledPluginPublicSurfaceModuleSync } from "./facade-runtime.js";
+import {
+  loadBundledPluginPublicSurfaceModuleSync,
+  tryLoadActivatedBundledPluginPublicSurfaceModuleSync,
+} from "./facade-runtime.js";
+import { resolvePrivateQaBundledPluginsEnv } from "./private-qa-bundled-env.js";
 
 export type QaRunnerCliRegistration = {
   commandName: string;
@@ -11,6 +14,17 @@ export type QaRunnerCliRegistration = {
 
 type QaRunnerRuntimeSurface = {
   qaRunnerCliRegistrations?: readonly QaRunnerCliRegistration[];
+};
+
+type QaRuntimeSurface = {
+  defaultQaRuntimeModelForMode: (
+    mode: string,
+    options?: {
+      alternate?: boolean;
+      preferredLiveModel?: string;
+    },
+  ) => string;
+  startQaLiveLaneGateway: (...args: unknown[]) => Promise<unknown>;
 };
 
 export type QaRunnerCliContribution =
@@ -26,21 +40,58 @@ export type QaRunnerCliContribution =
       commandName: string;
       description?: string;
       status: "blocked";
-    }
-  | {
-      pluginId: string;
-      commandName: string;
-      description?: string;
-      status: "missing";
-      npmSpec: string;
     };
 
-function listDeclaredQaRunnerPlugins(): Array<
+function isMissingQaRuntimeError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return (
+    error.message.includes("qa-lab") &&
+    (error.message.includes("runtime-api.js") ||
+      error.message.startsWith("Unable to open bundled plugin public surface "))
+  );
+}
+
+export function loadQaRuntimeModule(): QaRuntimeSurface {
+  const env = resolvePrivateQaBundledPluginsEnv();
+  return loadBundledPluginPublicSurfaceModuleSync<QaRuntimeSurface>({
+    dirName: ["qa", "lab"].join("-"),
+    artifactBasename: ["runtime-api", "js"].join("."),
+    ...(env ? { env } : {}),
+  });
+}
+
+// oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- QA runtime loader uses caller-supplied test API surface type.
+export function loadQaRunnerBundledPluginTestApi<T extends object>(pluginId: string): T {
+  const env = resolvePrivateQaBundledPluginsEnv();
+  return loadBundledPluginPublicSurfaceModuleSync<T>({
+    dirName: pluginId,
+    artifactBasename: "test-api.js",
+    ...(env ? { env } : {}),
+  });
+}
+
+export function isQaRuntimeAvailable(): boolean {
+  try {
+    loadQaRuntimeModule();
+    return true;
+  } catch (error) {
+    if (isMissingQaRuntimeError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function listDeclaredQaRunnerPlugins(
+  env: NodeJS.ProcessEnv | undefined = resolvePrivateQaBundledPluginsEnv(),
+): Array<
   PluginManifestRecord & {
     qaRunners: NonNullable<PluginManifestRecord["qaRunners"]>;
   }
 > {
-  return loadPluginManifestRegistry({ cache: true })
+  return loadPluginManifestRegistry({ cache: true, ...(env ? { env } : {}) })
     .plugins.filter(
       (
         plugin,
@@ -77,40 +128,30 @@ function indexRuntimeRegistrations(
   return registrationByCommandName;
 }
 
-function buildKnownQaRunnerCatalog(): readonly QaRunnerCliContribution[] {
-  const knownRunners = listBundledQaRunnerCatalog();
-  const seenCommandNames = new Map<string, string>();
-  return knownRunners.map((runner) => {
-    const previousOwner = seenCommandNames.get(runner.commandName);
-    if (previousOwner) {
-      throw new Error(
-        `QA runner command "${runner.commandName}" declared by both "${previousOwner}" and "${runner.pluginId}"`,
-      );
-    }
-    seenCommandNames.set(runner.commandName, runner.pluginId);
-    return {
-      pluginId: runner.pluginId,
-      commandName: runner.commandName,
-      ...(runner.description ? { description: runner.description } : {}),
-      status: "missing" as const,
-      npmSpec: runner.npmSpec,
-    };
+function loadQaRunnerRuntimeSurface(
+  plugin: PluginManifestRecord,
+  env?: NodeJS.ProcessEnv,
+): QaRunnerRuntimeSurface | null {
+  if (plugin.origin === "bundled") {
+    return loadBundledPluginPublicSurfaceModuleSync<QaRunnerRuntimeSurface>({
+      dirName: plugin.id,
+      artifactBasename: "runtime-api.js",
+      ...(env ? { env } : {}),
+    });
+  }
+  return tryLoadActivatedBundledPluginPublicSurfaceModuleSync<QaRunnerRuntimeSurface>({
+    dirName: plugin.id,
+    artifactBasename: "runtime-api.js",
+    ...(env ? { env } : {}),
   });
 }
 
 export function listQaRunnerCliContributions(): readonly QaRunnerCliContribution[] {
+  const env = resolvePrivateQaBundledPluginsEnv();
   const contributions = new Map<string, QaRunnerCliContribution>();
 
-  for (const runner of buildKnownQaRunnerCatalog()) {
-    contributions.set(runner.commandName, runner);
-  }
-
-  for (const plugin of listDeclaredQaRunnerPlugins()) {
-    const runtimeSurface =
-      tryLoadActivatedBundledPluginPublicSurfaceModuleSync<QaRunnerRuntimeSurface>({
-        dirName: plugin.id,
-        artifactBasename: "runtime-api.js",
-      });
+  for (const plugin of listDeclaredQaRunnerPlugins(env)) {
+    const runtimeSurface = loadQaRunnerRuntimeSurface(plugin, env);
     const runtimeRegistrationByCommandName = runtimeSurface
       ? indexRuntimeRegistrations(plugin.id, runtimeSurface)
       : null;

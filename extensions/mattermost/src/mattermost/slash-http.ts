@@ -60,6 +60,7 @@ type SlashHttpHandlerParams = {
    */
   botUserIdMap?: ReadonlyMap<string, string>;
   log?: (msg: string) => void;
+  bodyTimeoutMs?: number;
 };
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -68,10 +69,14 @@ const BODY_READ_TIMEOUT_MS = 5_000;
 /**
  * Read the full request body as a string.
  */
-function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
+function readBody(
+  req: IncomingMessage,
+  maxBytes: number,
+  timeoutMs = BODY_READ_TIMEOUT_MS,
+): Promise<string> {
   return readRequestBodyWithLimit(req, {
     maxBytes,
-    timeoutMs: BODY_READ_TIMEOUT_MS,
+    timeoutMs,
   });
 }
 
@@ -237,7 +242,7 @@ export function createSlashCommandHttpHandler(params: SlashHttpHandlerParams) {
 
     let body: string;
     try {
-      body = await readBody(req, MAX_BODY_BYTES);
+      body = await readBody(req, MAX_BODY_BYTES, bodyTimeoutMs);
     } catch (error) {
       if (isRequestBodyLimitError(error, "REQUEST_BODY_TIMEOUT")) {
         res.statusCode = 408;

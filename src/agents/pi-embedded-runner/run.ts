@@ -511,6 +511,7 @@ export async function runEmbeddedPiAgent(
         config?: RunEmbeddedPiAgentParams["config"];
         agentDir?: RunEmbeddedPiAgentParams["agentDir"];
         modelId?: string;
+        errorText?: string;
       }) => {
         const { profileId, reason } = failure;
         if (!profileId || !reason || reason === "timeout") {
@@ -524,6 +525,7 @@ export async function runEmbeddedPiAgent(
           agentDir,
           runId: params.runId,
           modelId: failure.modelId,
+          errorText: failure.errorText,
         });
       };
       const resolveAuthProfileFailureReason = (
@@ -1301,6 +1303,7 @@ export async function runEmbeddedPiAgent(
               profileId: lastProfileId,
               reason: promptProfileFailureReason,
               modelId,
+              errorText,
             });
             const promptFailoverFailure =
               promptFailoverReason !== null || isFailoverErrorMessage(errorText, { provider });
@@ -1846,6 +1849,7 @@ export async function runEmbeddedPiAgent(
               await maybeMarkAuthProfileFailure({
                 profileId: lastProfileId,
                 reason: resolveAuthProfileFailureReason(assistantFailoverReason),
+                errorText: assistantForFailover?.errorMessage ?? undefined,
               });
             }
             return {
@@ -1910,6 +1914,7 @@ export async function runEmbeddedPiAgent(
               await maybeMarkAuthProfileFailure({
                 profileId: lastProfileId,
                 reason: resolveAuthProfileFailureReason(assistantFailoverReason),
+                errorText: assistantForFailover?.errorMessage ?? undefined,
               });
             }
 

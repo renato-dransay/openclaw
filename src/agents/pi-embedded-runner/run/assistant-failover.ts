@@ -68,6 +68,7 @@ export async function handleAssistantFailover(params: {
     profileId?: string;
     reason?: AuthProfileFailureReason | null;
     modelId?: string;
+    errorText?: string;
   }) => Promise<void>;
   maybeEscalateRateLimitProfileFallback: (params: {
     failoverProvider: string;
@@ -102,6 +103,7 @@ export async function handleAssistantFailover(params: {
         profileId: params.lastProfileId,
         reason,
         modelId: params.modelId,
+        errorText: params.lastAssistant?.errorMessage ?? undefined,
       });
       if (params.timedOut && !params.isProbeSession) {
         params.warn(`Profile ${params.lastProfileId} timed out. Trying next account...`);

@@ -7,6 +7,7 @@ import {
   isProfileInCooldown,
   markAuthProfileFailure,
   markAuthProfileUsed,
+  parseChatGPTUsageLimitCooldownMinutes,
   resolveProfilesUnavailableReason,
   resolveProfileUnusableUntil,
   resolveProfileUnusableUntilForDisplay,
@@ -1125,5 +1126,88 @@ describe("markAuthProfileFailure — per-model cooldown metadata", () => {
     // Even same-model auth failure should clear model scope (auth is profile-wide)
     expect(stats?.cooldownReason).toBe("auth");
     expect(stats?.cooldownModel).toBeUndefined();
+  });
+});
+
+describe("parseChatGPTUsageLimitCooldownMinutes", () => {
+  it("extracts minutes from the production ChatGPT usage-limit error format", () => {
+    expect(
+      parseChatGPTUsageLimitCooldownMinutes(
+        "⚠️ You have hit your ChatGPT usage limit (team plan). Try again in ~2748 min.",
+      ),
+    ).toBe(360);
+  });
+
+  it("extracts small minute values verbatim", () => {
+    expect(parseChatGPTUsageLimitCooldownMinutes("Try again in ~5 min.")).toBe(5);
+  });
+
+  it("returns null for unrelated error messages", () => {
+    expect(parseChatGPTUsageLimitCooldownMinutes("some other error")).toBeNull();
+  });
+
+  it("clamps parsed minutes to the 360-minute (6 hour) cap", () => {
+    expect(parseChatGPTUsageLimitCooldownMinutes("Try again in ~500 min.")).toBe(360);
+    expect(parseChatGPTUsageLimitCooldownMinutes("Try again in ~2748 min.")).toBe(360);
+  });
+
+  it("extracts the cap exactly when input equals 360", () => {
+    expect(parseChatGPTUsageLimitCooldownMinutes("Try again in ~360 min.")).toBe(360);
+  });
+
+  it("is case-insensitive and tolerant of whitespace", () => {
+    expect(parseChatGPTUsageLimitCooldownMinutes("try again in ~12   min")).toBe(12);
+  });
+});
+
+describe("markAuthProfileFailure — ChatGPT usage-limit error text drives cooldown", () => {
+  it("applies parsed cooldown (~2748 min, clamped to 360) for codex rate_limit errors", async () => {
+    const now = 1_700_000_000_000;
+    const store = makeStore({});
+    // No WHAM probe: simulate probe failure so the parsed value is what matters.
+    fetchMock.mockRejectedValueOnce(new Error("network unavailable"));
+
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      await markAuthProfileFailure({
+        store,
+        profileId: "openai-codex:default",
+        reason: "rate_limit",
+        modelId: "gpt-5.4",
+        errorText: "⚠️ You have hit your ChatGPT usage limit (team plan). Try again in ~2748 min.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const stats = store.usageStats?.["openai-codex:default"];
+    // 360 minutes = 21_600_000 ms, must be the winner over the 30s WHAM-probe-failure fallback.
+    expect(stats?.cooldownUntil).toBe(now + 360 * 60 * 1000);
+  });
+
+  it("skips the profile in isProfileInCooldown while cooldownUntil is in the future", async () => {
+    const now = 1_700_000_000_000;
+    const store = makeStore({});
+    fetchMock.mockRejectedValueOnce(new Error("network unavailable"));
+
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      await markAuthProfileFailure({
+        store,
+        profileId: "openai-codex:default",
+        reason: "rate_limit",
+        modelId: "gpt-5.4",
+        errorText: "Try again in ~120 min.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Future cooldown → skip.
+    expect(isProfileInCooldown(store, "openai-codex:default", now + 60 * 60 * 1000)).toBe(true);
+    // After cooldown expiry → re-eligible.
+    expect(isProfileInCooldown(store, "openai-codex:default", now + 121 * 60 * 1000)).toBe(false);
   });
 });

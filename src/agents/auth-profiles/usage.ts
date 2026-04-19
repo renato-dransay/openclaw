@@ -39,6 +39,33 @@ const FAILURE_REASON_ORDER = new Map<AuthProfileFailureReason, number>(
   FAILURE_REASON_PRIORITY.map((reason, index) => [reason, index]),
 );
 
+// EVIDENCE: gateway.err.log:126997 (2026-04-15T00:14:04) — "error=⚠️ You have hit your ChatGPT usage limit (team plan). Try again in ~2748 min."
+const CHATGPT_USAGE_LIMIT_COOLDOWN_RE = /Try again in ~?(\d+)\s*min/i;
+const PARSED_COOLDOWN_MAX_MINUTES = 360;
+
+/**
+ * Extract a cooldown duration (minutes) from a ChatGPT / Codex usage-limit
+ * error string like "Try again in ~2748 min." Returns `null` when the pattern
+ * does not match. Values are clamped to {@link PARSED_COOLDOWN_MAX_MINUTES} so
+ * a single hostile error cannot shelve a profile for days.
+ */
+export function parseChatGPTUsageLimitCooldownMinutes(
+  text: string | undefined | null,
+): number | null {
+  if (typeof text !== "string" || text.length === 0) {
+    return null;
+  }
+  const match = CHATGPT_USAGE_LIMIT_COOLDOWN_RE.exec(text);
+  if (!match) {
+    return null;
+  }
+  const parsed = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return Math.min(parsed, PARSED_COOLDOWN_MAX_MINUTES);
+}
+
 const WHAM_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const WHAM_TIMEOUT_MS = 3_000;
 const WHAM_BURST_COOLDOWN_MS = 15_000;
@@ -113,6 +140,34 @@ function isWhamWindowExhausted(window: WhamUsageWindow | undefined): boolean {
     Number.isFinite(window.used_percent) &&
     window.used_percent >= 100
   );
+}
+
+function applyParsedCooldownResult(params: {
+  existing: ProfileUsageStats;
+  computed: ProfileUsageStats;
+  now: number;
+  cooldownMs: number;
+}): ProfileUsageStats {
+  const existingCooldownUntil = params.existing.cooldownUntil;
+  const existingActiveCooldownUntil =
+    typeof existingCooldownUntil === "number" &&
+    Number.isFinite(existingCooldownUntil) &&
+    existingCooldownUntil > params.now
+      ? existingCooldownUntil
+      : 0;
+  const computedCooldownUntil =
+    typeof params.computed.cooldownUntil === "number" &&
+    Number.isFinite(params.computed.cooldownUntil)
+      ? params.computed.cooldownUntil
+      : 0;
+  return {
+    ...params.computed,
+    cooldownUntil: Math.max(
+      existingActiveCooldownUntil,
+      computedCooldownUntil,
+      params.now + params.cooldownMs,
+    ),
+  };
 }
 
 function applyWhamCooldownResult(params: {
@@ -810,8 +865,9 @@ export async function markAuthProfileFailure(params: {
   agentDir?: string;
   runId?: string;
   modelId?: string;
+  errorText?: string;
 }): Promise<void> {
-  const { store, profileId, reason, agentDir, cfg, runId, modelId } = params;
+  const { store, profileId, reason, agentDir, cfg, runId, modelId, errorText } = params;
   const profile = store.profiles[profileId];
   if (!profile || isAuthCooldownBypassedForProvider(profile.provider)) {
     return;
@@ -820,6 +876,14 @@ export async function markAuthProfileFailure(params: {
   const whamResult = shouldProbeWhamForFailure(profile.provider, reason)
     ? await probeWhamForCooldown(store, profileId)
     : null;
+
+  // Parse explicit "Try again in ~N min" hints from the provider error text.
+  // When present this is a stronger signal than the stepped backoff and avoids
+  // burning 15-50s/run attempting a model whose cooldown is explicitly known.
+  const parsedCooldownMinutes =
+    reason === "rate_limit" ? parseChatGPTUsageLimitCooldownMinutes(errorText) : null;
+  const parsedCooldownMs =
+    parsedCooldownMinutes !== null ? parsedCooldownMinutes * 60 * 1000 : null;
 
   let nextStats: ProfileUsageStats | undefined;
   let previousStats: ProfileUsageStats | undefined;
@@ -847,7 +911,7 @@ export async function markAuthProfileFailure(params: {
         cfgResolved,
         modelId,
       });
-      nextStats =
+      const afterWham =
         whamResult && shouldProbeWhamForFailure(profile.provider, reason)
           ? applyWhamCooldownResult({
               existing: previousStats ?? {},
@@ -856,6 +920,15 @@ export async function markAuthProfileFailure(params: {
               whamResult,
             })
           : computed;
+      nextStats =
+        parsedCooldownMs !== null
+          ? applyParsedCooldownResult({
+              existing: previousStats ?? {},
+              computed: afterWham,
+              now,
+              cooldownMs: parsedCooldownMs,
+            })
+          : afterWham;
       updateUsageStatsEntry(freshStore, profileId, () => nextStats ?? computed);
       return true;
     },
@@ -894,7 +967,7 @@ export async function markAuthProfileFailure(params: {
     cfgResolved,
     modelId,
   });
-  nextStats =
+  const afterWham =
     whamResult && shouldProbeWhamForFailure(store.profiles[profileId]?.provider, reason)
       ? applyWhamCooldownResult({
           existing: previousStats ?? {},
@@ -903,6 +976,15 @@ export async function markAuthProfileFailure(params: {
           whamResult,
         })
       : computed;
+  nextStats =
+    parsedCooldownMs !== null
+      ? applyParsedCooldownResult({
+          existing: previousStats ?? {},
+          computed: afterWham,
+          now,
+          cooldownMs: parsedCooldownMs,
+        })
+      : afterWham;
   updateUsageStatsEntry(store, profileId, () => nextStats ?? computed);
   authProfileUsageDeps.saveAuthProfileStore(store, agentDir);
   logAuthProfileFailureStateChange({

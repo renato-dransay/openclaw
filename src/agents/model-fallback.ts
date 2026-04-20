@@ -892,6 +892,19 @@ export async function runWithModelFallback<T>(params: {
         attempt: i + 1,
         total: candidates.length,
       });
+
+      // Backoff before the next candidate when the previous failure was a
+      // rate limit or overload. Prevents cascading 429s across a chain
+      // whose models share one account's quota (e.g. 3 zai variants).
+      if (i < candidates.length - 1) {
+        const failoverReason = describeFailoverError(normalized).reason;
+        if (failoverReason === "rate_limit" || failoverReason === "overloaded") {
+          const nextCandidate = candidates[i + 1];
+          const sameProvider = nextCandidate?.provider === candidate.provider;
+          const delayMs = sameProvider ? 20_000 : 5_000;
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
     }
   }
 

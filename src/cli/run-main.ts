@@ -51,29 +51,6 @@ async function closeCliMemoryManagers(): Promise<void> {
   }
 }
 
-export function rewriteUpdateFlagArgv(argv: string[]): string[] {
-  const index = argv.indexOf("--update");
-  if (index === -1) {
-    return argv;
-  }
-
-  const next = [...argv];
-  next.splice(index, 1, "update");
-  return next;
-}
-
-export function shouldEnsureCliPath(argv: string[]): boolean {
-  const invocation = resolveCliArgvInvocation(argv);
-  if (invocation.hasHelpOrVersion) {
-    return false;
-  }
-  return shouldEnsureCliPathForCommandPath(invocation.commandPath);
-}
-
-export function shouldUseRootHelpFastPath(argv: string[]): boolean {
-  return resolveCliArgvInvocation(argv).isRootHelpInvocation;
-}
-
 /**
  * Detect --json invocations early (before Commander parses argv) so that log
  * output is routed to stderr BEFORE any plugin `register()` handler can run.

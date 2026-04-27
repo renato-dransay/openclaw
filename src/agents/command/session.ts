@@ -161,6 +161,8 @@ export function resolveSessionKeyForRequest(opts: {
     return { sessionKey, sessionStore, storePath };
   }
 
+  const requestedAgentId = opts.agentId?.trim() ? normalizeAgentId(opts.agentId) : undefined;
+  const requestedSessionId = opts.sessionId?.trim() || undefined;
   const explicitSessionKey =
     opts.sessionKey?.trim() ||
     (!requestedSessionId

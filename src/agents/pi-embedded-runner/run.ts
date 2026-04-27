@@ -2156,7 +2156,7 @@ export async function runEmbeddedPiAgent(
             if (lastProfileId) {
               await maybeMarkAuthProfileFailure({
                 profileId: lastProfileId,
-                reason: resolveAuthProfileFailureReason(assistantFailoverReason),
+                reason: resolveRunAuthProfileFailureReason(assistantFailoverReason),
                 errorText: assistantForFailover?.errorMessage ?? undefined,
               });
             }
@@ -2265,7 +2265,7 @@ export async function runEmbeddedPiAgent(
             if (lastProfileId) {
               await maybeMarkAuthProfileFailure({
                 profileId: lastProfileId,
-                reason: resolveAuthProfileFailureReason(assistantFailoverReason),
+                reason: resolveRunAuthProfileFailureReason(assistantFailoverReason),
                 errorText: assistantForFailover?.errorMessage ?? undefined,
               });
             }

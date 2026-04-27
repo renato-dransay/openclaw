@@ -292,6 +292,8 @@ import {
   wrapStreamFnSanitizeMalformedToolCalls,
   wrapStreamFnTrimToolCallNames,
 } from "./attempt.tool-call-normalization.js";
+import { buildEmbeddedAttemptToolRunContext } from "./attempt.tool-run-context.js";
+import { resolveAttemptTranscriptPolicy } from "./attempt.transcript-policy.js";
 import { waitForCompactionRetryWithAggregateTimeout } from "./compaction-retry-aggregate-timeout.js";
 import {
   resolveRunTimeoutDuringCompaction,
@@ -640,41 +642,54 @@ export async function runEmbeddedAttempt(
     const sessionLabel = params.sessionKey ?? params.sessionId;
     const contextInjectionMode = resolveContextInjectionMode(params.config);
     const agentDir = params.agentDir ?? resolveOpenClawAgentDir();
-    const toolsRaw = params.disableTools
-      ? []
-      : (() => {
-          const allTools = createOpenClawCodingTools({
-            agentId: sessionAgentId,
-            trigger: params.trigger,
-            memoryFlushWritePath: params.memoryFlushWritePath,
-            exec: {
-              ...params.execOverrides,
-              elevated: params.bashElevated,
-            },
-            sandbox,
-            messageProvider: params.messageChannel ?? params.messageProvider,
-            agentAccountId: params.agentAccountId,
-            messageTo: params.messageTo,
-            messageThreadId: params.messageThreadId,
-            groupId: params.groupId,
-            groupChannel: params.groupChannel,
-            groupSpace: params.groupSpace,
-            memberRoleIds: params.memberRoleIds,
-            spawnedBy: params.spawnedBy,
-            senderId: params.senderId,
-            senderName: params.senderName,
-            senderUsername: params.senderUsername,
-            senderE164: params.senderE164,
-            senderIsOwner: params.senderIsOwner,
-            allowGatewaySubagentBinding: params.allowGatewaySubagentBinding,
-            sessionKey: sandboxSessionKey,
-            sessionId: params.sessionId,
-            runId: params.runId,
-            agentDir,
-            workspaceDir: effectiveWorkspace,
-            // When sandboxing uses a copied workspace (`ro` or `none`), effectiveWorkspace points
-            // at the sandbox copy. Spawned subagents should inherit the real workspace instead.
-            spawnWorkspaceDir: resolveAttemptSpawnWorkspaceDir({
+    const diagnosticTrace = freezeDiagnosticTraceContext(
+      createDiagnosticTraceContextFromActiveScope(),
+    );
+    const runTrace = freezeDiagnosticTraceContext(
+      createChildDiagnosticTraceContext(diagnosticTrace),
+    );
+    const diagnosticRunBase = {
+      runId: params.runId,
+      ...(params.sessionKey && { sessionKey: params.sessionKey }),
+      ...(params.sessionId && { sessionId: params.sessionId }),
+      provider: params.provider,
+      model: params.modelId,
+      trigger: params.trigger,
+      ...((params.messageChannel ?? params.messageProvider)
+        ? { channel: params.messageChannel ?? params.messageProvider }
+        : {}),
+      trace: runTrace,
+    };
+    emitTrustedDiagnosticEvent({
+      type: "run.started",
+      ...diagnosticRunBase,
+    });
+    const diagnosticRunStartedAt = Date.now();
+    let diagnosticRunCompleted = false;
+    emitDiagnosticRunCompleted = (outcome, err) => {
+      if (diagnosticRunCompleted) {
+        return;
+      }
+      diagnosticRunCompleted = true;
+      emitTrustedDiagnosticEvent({
+        type: "run.completed",
+        ...diagnosticRunBase,
+        durationMs: Date.now() - diagnosticRunStartedAt,
+        outcome,
+        ...(err ? { errorCategory: diagnosticErrorCategory(err) } : {}),
+      });
+    };
+    const toolsRaw =
+      params.disableTools || params.modelRun
+        ? []
+        : (() => {
+            const allTools = createOpenClawCodingTools({
+              agentId: sessionAgentId,
+              ...buildEmbeddedAttemptToolRunContext({ ...params, trace: runTrace }),
+              exec: {
+                ...params.execOverrides,
+                elevated: params.bashElevated,
+              },
               sandbox,
               messageProvider: params.messageChannel ?? params.messageProvider,
               agentAccountId: params.agentAccountId,
@@ -1180,22 +1195,16 @@ export async function runEmbeddedAttempt(
     let systemPromptText = systemPromptOverride();
     const userPromptPrefixText = bootstrapRouting.userPromptPrefixText;
 
-    const runTimeoutWithGrace = resolveRunTimeoutWithCompactionGraceMs({
-      runTimeoutMs: params.timeoutMs,
-      compactionTimeoutMs: resolveCompactionTimeoutMs(params.config),
-    });
+    // Keep the session lock scoped to transcript/session mutations. Cold plugin
+    // and tool setup can be slow, and holding the lock there blocks CLI fallback
+    // from taking over the same session when a gateway run stalls before model I/O.
     const sessionLock = await acquireSessionWriteLock({
       sessionFile: params.sessionFile,
-      // Use the run timeout as the lock acquisition timeout so that concurrent
-      // dispatches to the same session file wait long enough for the active turn
-      // to finish, rather than timing out after the default 10 seconds.
-      timeoutMs: runTimeoutWithGrace,
-      // Reduce stale threshold: if a lock has been held for >2 minutes by another
-      // process, reclaim it.  The previous 10-minute default was too generous and
-      // caused cascading model-fallback failures when a stale agent held the lock.
-      staleMs: 2 * 60 * 1000,
       maxHoldMs: resolveSessionLockMaxHoldFromTimeout({
-        timeoutMs: runTimeoutWithGrace,
+        timeoutMs: resolveRunTimeoutWithCompactionGraceMs({
+          runTimeoutMs: params.timeoutMs,
+          compactionTimeoutMs: resolveCompactionTimeoutMs(params.config),
+        }),
       }),
     });
 

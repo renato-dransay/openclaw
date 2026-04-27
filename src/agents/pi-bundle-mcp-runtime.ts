@@ -4,29 +4,18 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-
-/**
- * Strip the $schema dialect URI from MCP tool inputSchemas.
- * MCP servers like Playwright MCP emit JSON Schema 2020-12 dialect markers
- * (e.g. "$schema": "https://json-schema.org/draft/2020-12/schema") which AJV
- * (configured for draft-07) cannot resolve, causing "no schema with key or ref" errors.
- * Removing the $schema keyword is safe — AJV defaults to its configured draft.
- */
-function stripSchemaDialect(schema: unknown): unknown {
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
-    return schema;
-  }
-  const record = schema as Record<string, unknown>;
-  if ("$schema" in record) {
-    const { $schema: _, ...rest } = record;
-    return rest;
-  }
-  return schema;
-}
-import type { OpenClawConfig } from "../config/config.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
+import type {
+  JsonSchemaType,
+  JsonSchemaValidator,
+  jsonSchemaValidator,
+} from "@modelcontextprotocol/sdk/validation/types.js";
+import type { ErrorObject, ValidateFunction } from "ajv";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { logWarn } from "../logger.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { redactSensitiveUrlLikeString } from "../shared/net/redact-sensitive-url.js";
+import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { loadEmbeddedPiMcpConfig } from "./embedded-pi-mcp.js";
 import { isMcpConfigRecord } from "./mcp-config-shared.js";
 import { resolveMcpTransport } from "./mcp-transport.js";
@@ -288,8 +277,8 @@ export function createSessionMcpRuntime(params: {
                 safeServerName,
                 toolName,
                 title: tool.title,
-                description: tool.description?.trim() || undefined,
-                inputSchema: stripSchemaDialect(tool.inputSchema),
+                description: normalizeOptionalString(tool.description),
+                inputSchema: tool.inputSchema,
                 fallbackDescription: `Provided by bundle MCP server "${serverName}" (${resolved.description}).`,
               });
             }

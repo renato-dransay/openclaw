@@ -33,6 +33,7 @@ export {
   warnMissingProviderGroupPolicyFallbackOnce,
 } from "openclaw/plugin-sdk/config-runtime";
 export { evaluateSenderGroupAccessForPolicy } from "openclaw/plugin-sdk/group-access";
+export { getPluginCommandSpecs } from "openclaw/plugin-sdk/plugin-runtime";
 export {
   getAgentScopedMediaLocalRoots,
   resolveChannelMediaMaxBytes,

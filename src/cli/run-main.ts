@@ -8,7 +8,6 @@ import { normalizeEnv } from "../infra/env.js";
 import { isMainModule } from "../infra/is-main.js";
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import { assertSupportedRuntime } from "../infra/runtime-guard.js";
-import { enableConsoleCapture, routeLogsToStderr } from "../logging.js";
 import type { PluginManifestCommandAliasRegistry } from "../plugins/manifest-command-aliases.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { resolveCliArgvInvocation } from "./argv-invocation.js";
@@ -287,11 +286,9 @@ export async function runCli(argv: string[] = process.argv) {
     // but only after Commander starts parsing, which is too late. See
     // shouldHoistRouteLogsToStderr for details.
     if (shouldHoistRouteLogsToStderr(normalizedArgv)) {
+      const { routeLogsToStderr } = await import("../logging.js");
       routeLogsToStderr();
     }
-
-    // Capture all console output into structured logs while keeping stdout/stderr behavior.
-    enableConsoleCapture();
 
     try {
       // Capture all console output into structured logs while keeping stdout/stderr behavior.

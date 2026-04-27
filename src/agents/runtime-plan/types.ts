@@ -25,6 +25,7 @@ export type AgentRuntimeFailoverReason =
   | "timeout"
   | "model_not_found"
   | "session_expired"
+  | "circuit_open"
   | "unknown";
 
 export type AgentRuntimeConfig = unknown;

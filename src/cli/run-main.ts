@@ -267,6 +267,22 @@ export async function runCli(argv: string[] = process.argv) {
       routeLogsToStderr();
     }
 
+    const { createCliProgress } = await import("./progress.js");
+    const startupProgress = createCliProgress({
+      label: "Loading OpenClaw CLI…",
+      indeterminate: true,
+      delayMs: 0,
+      fallback: "none",
+    });
+    let startupProgressStopped = false;
+    const stopStartupProgress = () => {
+      if (startupProgressStopped) {
+        return;
+      }
+      startupProgressStopped = true;
+      startupProgress.done();
+    };
+
     try {
       // Capture all console output into structured logs while keeping stdout/stderr behavior.
       const { enableConsoleCapture } = await import("../logging.js");

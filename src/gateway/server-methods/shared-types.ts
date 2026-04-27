@@ -23,8 +23,10 @@ export type GatewayClient = {
   canvasHostUrl?: string;
   canvasCapability?: string;
   canvasCapabilityExpiresAtMs?: number;
+  isDeviceTokenAuth?: boolean;
   internal?: {
     allowModelOverride?: boolean;
+    pluginRuntimeOwnerId?: string;
   };
 };
 
@@ -104,6 +106,9 @@ export type GatewayRequestContext = {
     prompter: import("../../wizard/prompts.js").WizardPrompter,
   ) => Promise<void>;
   broadcastVoiceWakeChanged: (triggers: string[]) => void;
+  broadcastVoiceWakeRoutingChanged: (
+    config: import("../../infra/voicewake-routing.js").VoiceWakeRoutingConfig,
+  ) => void;
   unavailableGatewayMethods?: ReadonlySet<string>;
 };
 

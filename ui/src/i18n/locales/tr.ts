@@ -197,10 +197,17 @@ export const tr: TranslationMap = {
       wsUrl: "WebSocket URL'si",
       token: "Gateway Token",
       password: "Parola (saklanmaz)",
+      passwordPlaceholder: "sistem veya paylaşılan parola",
       sessionKey: "Varsayılan Oturum Anahtarı",
       language: "Dil",
       connectHint: "Bağlantı değişikliklerini uygulamak için Bağlan'a tıklayın.",
       trustedProxy: "Güvenilir proxy üzerinden kimlik doğrulandı.",
+      showToken: "Token'ı göster",
+      hideToken: "Token'ı gizle",
+      toggleTokenVisibility: "Token görünürlüğünü değiştir",
+      showPassword: "Parolayı göster",
+      hidePassword: "Parolayı gizle",
+      togglePasswordVisibility: "Parola görünürlüğünü değiştir",
     },
     snapshot: {
       title: "Anlık Görüntü",
@@ -239,8 +246,19 @@ export const tr: TranslationMap = {
     },
     pairing: {
       hint: "Bu cihazın Gateway ana bilgisayarından eşleştirme onayı alması gerekiyor.",
+      scopeUpgradeTitle: "Kapsam yükseltmesi onay bekliyor.",
+      scopeUpgradeSummary:
+        "Bu cihaz zaten eşleştirilmiş, ancak istenen daha geniş kapsam onay bekliyor.",
+      roleUpgradeTitle: "Rol yükseltmesi onay bekliyor.",
+      roleUpgradeSummary:
+        "Bu cihaz zaten eşleştirilmiş, ancak istenen rol değişikliği onay bekliyor.",
+      metadataUpgradeTitle: "Cihaz meta veri değişikliği onay bekliyor.",
+      metadataUpgradeSummary:
+        "Bu cihaz zaten eşleştirilmiş, ancak meta veri değişikliği onay bekliyor.",
       mobileHint:
         "Mobilde misiniz? Masaüstünüzde openclaw dashboard --no-open komutundan tam URL'yi (#token=... dahil) kopyalayın.",
+      docsTitle: "Cihaz eşleştirme belgeleri (yeni sekmede açılır)",
+      docsLink: "Belgeler: Cihaz eşleştirme",
     },
     insecure: {
       hint: "Bu sayfa HTTP olduğu için tarayıcı cihaz kimliğini engelliyor. HTTPS (Tailscale Serve) kullanın veya Gateway ana bilgisayarında {url} adresini açın.",
@@ -255,6 +273,14 @@ export const tr: TranslationMap = {
       step4: "Ya da yeniden kullanılabilir bir token oluşturun:",
       docsHint: "Uzaktan erişim için Tailscale Serve önerilir. ",
       docsLink: "Dokümanları oku →",
+      authDocsTitle: "Control UI kimlik doğrulama belgeleri (yeni sekmede açılır)",
+      authDocsLink: "Belgeler: Control UI kimlik doğrulama",
+      tailscaleDocsTitle: "Tailscale Serve belgeleri (yeni sekmede açılır)",
+      tailscaleDocsLink: "Belgeler: Tailscale Serve",
+      insecureHttpDocsTitle: "Güvenli olmayan HTTP belgeleri (yeni sekmede açılır)",
+      insecureHttpDocsLink: "Belgeler: Güvenli olmayan HTTP",
+      copyCommand: "Komutu kopyala",
+      copyCommandAria: "Komutu kopyala: {command}",
     },
     cards: {
       cost: "Maliyet",
@@ -291,6 +317,30 @@ export const tr: TranslationMap = {
     palette: {
       placeholder: "Bir komut yazın…",
       noResults: "Sonuç yok",
+      categories: {
+        search: "Arama",
+        navigation: "Navigation",
+        skills: "Skills",
+      },
+      items: {
+        overview: "Genel Bakış",
+        sessions: "Oturumlar",
+        scheduled: "Zamanlanmış",
+        skills: "Skills",
+        settings: "Ayarlar",
+        agents: "Ajanlar",
+        shellCommand: "Shell Komutu",
+        debugMode: "Hata Ayıklama Modu",
+      },
+      descriptions: {
+        shellCommand: "Shell çalıştır",
+        debugMode: "Hata ayıklamayı değiştir",
+      },
+      footer: {
+        navigate: "gezin",
+        select: "seç",
+        close: "kapat",
+      },
     },
   },
   dreaming: {
@@ -304,6 +354,15 @@ export const tr: TranslationMap = {
       refreshing: "Yenileniyor…",
       on: "Dreaming Açık",
       off: "Dreaming Kapalı",
+    },
+    restartConfirmation: {
+      title: "Restart Gateway to Apply Change",
+      subtitle: "Changing Dreaming mode restarts the gateway.",
+      warning:
+        "This action will restart the Gateway and may temporarily interrupt chats, automations, and connected channels.",
+      confirm: "Confirm Restart",
+      restarting: "Restarting…",
+      failed: "Could not apply change. Check your connection and try again.",
     },
     status: {
       active: "Dreaming Etkin",
@@ -626,6 +685,12 @@ export const tr: TranslationMap = {
   login: {
     subtitle: "Gateway Kontrol Paneli",
     passwordPlaceholder: "isteğe bağlı",
+    showToken: "Tokenı göster",
+    hideToken: "Tokenı gizle",
+    toggleTokenVisibility: "Token görünürlüğünü değiştir",
+    showPassword: "Parolayı göster",
+    hidePassword: "Parolayı gizle",
+    togglePasswordVisibility: "Parola görünürlüğünü değiştir",
   },
   chat: {
     disconnected: "Gateway bağlantısı kesildi.",
@@ -652,6 +717,7 @@ export const tr: TranslationMap = {
     uk: "Українська (Ukraynaca)",
     id: "Bahasa Indonesia (Endonezce)",
     pl: "Polski (Lehçe)",
+    th: "ไทย (Tayca)",
   },
   cron: {
     summary: {

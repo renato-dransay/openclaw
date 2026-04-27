@@ -68,6 +68,9 @@ vi.mock("../daemon/service-audit.js", () => ({
   readEmbeddedGatewayToken: readEmbeddedGatewayTokenForTest,
   SERVICE_AUDIT_CODES: {
     gatewayEntrypointMismatch: testServiceAuditCodes.gatewayEntrypointMismatch,
+    gatewayManagedEnvEmbedded: testServiceAuditCodes.gatewayManagedEnvEmbedded,
+    gatewayProxyEnvEmbedded: testServiceAuditCodes.gatewayProxyEnvEmbedded,
+    gatewayTokenMismatch: testServiceAuditCodes.gatewayTokenMismatch,
   },
 }));
 
@@ -99,6 +102,7 @@ import {
   maybeRepairGatewayServiceConfig,
   maybeScanExtraGatewayServices,
 } from "./doctor-gateway-services.js";
+import { EXTERNAL_SERVICE_REPAIR_NOTE } from "./doctor-service-repair-policy.js";
 
 const originalStdinIsTTY = process.stdin.isTTY;
 const originalUpdateInProgress = process.env.OPENCLAW_UPDATE_IN_PROGRESS;
@@ -281,6 +285,81 @@ describe("maybeRepairGatewayServiceConfig", () => {
     expect(mocks.install).toHaveBeenCalledTimes(1);
   });
 
+  it("passes planned managed env keys into service audit for legacy inline secret detection", async () => {
+    mocks.readCommand.mockResolvedValue({
+      programArguments: gatewayProgramArguments,
+      environment: {
+        TAVILY_API_KEY: "old-inline-value",
+      },
+    });
+    mocks.buildGatewayInstallPlan.mockResolvedValue({
+      programArguments: gatewayProgramArguments,
+      workingDirectory: "/tmp",
+      environment: {
+        OPENCLAW_SERVICE_MANAGED_ENV_KEYS: "TAVILY_API_KEY",
+      },
+    });
+    mocks.auditGatewayServiceConfig.mockResolvedValue({
+      ok: false,
+      issues: [
+        {
+          code: "gateway-managed-env-embedded",
+          message: "Gateway service embeds managed environment values that should load at runtime.",
+          detail: "inline keys: TAVILY_API_KEY",
+          level: "recommended",
+        },
+      ],
+    });
+    mocks.install.mockResolvedValue(undefined);
+
+    await runRepair({ gateway: {} });
+
+    expect(mocks.auditGatewayServiceConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedManagedServiceEnvKeys: new Set(["TAVILY_API_KEY"]),
+      }),
+    );
+    expect(mocks.install).toHaveBeenCalledTimes(1);
+  });
+
+  it("repairs gateway services with embedded proxy environment values", async () => {
+    mocks.readCommand.mockResolvedValue({
+      programArguments: gatewayProgramArguments,
+      environment: {
+        HTTP_PROXY: "http://proxy.local:7890",
+        HTTPS_PROXY: "https://proxy.local:7890",
+      },
+    });
+    mocks.buildGatewayInstallPlan.mockResolvedValue({
+      programArguments: gatewayProgramArguments,
+      workingDirectory: "/tmp",
+      environment: {},
+    });
+    mocks.auditGatewayServiceConfig.mockResolvedValue({
+      ok: false,
+      issues: [
+        {
+          code: "gateway-proxy-env-embedded",
+          message: "Gateway service embeds proxy environment values that should not be persisted.",
+          detail: "inline keys: HTTP_PROXY, HTTPS_PROXY",
+          level: "recommended",
+        },
+      ],
+    });
+    mocks.install.mockResolvedValue(undefined);
+
+    await runRepair({ gateway: {} });
+
+    expect(mocks.install).toHaveBeenCalledWith(
+      expect.objectContaining({
+        environment: expect.not.objectContaining({
+          HTTP_PROXY: expect.any(String),
+          HTTPS_PROXY: expect.any(String),
+        }),
+      }),
+    );
+  });
+
   it("uses OPENCLAW_GATEWAY_TOKEN when config token is missing", async () => {
     await withEnvAsync({ OPENCLAW_GATEWAY_TOKEN: "env-token" }, async () => {
       setupGatewayTokenRepairScenario();
@@ -359,6 +438,49 @@ describe("maybeRepairGatewayServiceConfig", () => {
     expect(mocks.note).not.toHaveBeenCalledWith(
       expect.stringContaining("Gateway service entrypoint does not match the current install."),
       "Gateway service config",
+    );
+    expect(mocks.stage).not.toHaveBeenCalled();
+    expect(mocks.install).not.toHaveBeenCalled();
+  });
+
+  it("keeps wrapper-managed gateway services aligned during entrypoint drift checks", async () => {
+    const wrapperPath = "/usr/local/bin/openclaw-doppler";
+    mocks.readCommand.mockResolvedValue({
+      programArguments: [wrapperPath, "gateway", "--port", "18789"],
+      environment: {
+        OPENCLAW_WRAPPER: wrapperPath,
+      },
+    });
+    mocks.auditGatewayServiceConfig.mockResolvedValue({
+      ok: true,
+      issues: [],
+    });
+    mocks.buildGatewayInstallPlan.mockImplementation(async ({ env }) => ({
+      programArguments: [env.OPENCLAW_WRAPPER, "gateway", "--port", "18789"],
+      environment: {
+        OPENCLAW_WRAPPER: env.OPENCLAW_WRAPPER,
+      },
+    }));
+
+    await runRepair({ gateway: {} });
+
+    expect(mocks.buildGatewayInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({
+          OPENCLAW_WRAPPER: wrapperPath,
+        }),
+        existingEnvironment: expect.objectContaining({
+          OPENCLAW_WRAPPER: wrapperPath,
+        }),
+      }),
+    );
+    expect(mocks.note).not.toHaveBeenCalledWith(
+      expect.stringContaining("Gateway service entrypoint does not match the current install."),
+      "Gateway service config",
+    );
+    expect(mocks.note).toHaveBeenCalledWith(
+      "Gateway service invokes OPENCLAW_WRAPPER: /usr/local/bin/openclaw-doppler",
+      "Gateway",
     );
     expect(mocks.stage).not.toHaveBeenCalled();
     expect(mocks.install).not.toHaveBeenCalled();
@@ -593,6 +715,31 @@ describe("maybeRepairGatewayServiceConfig", () => {
       },
     );
   });
+
+  it("reports service config drift but skips service rewrite when service repair policy is external", async () => {
+    await withEnvAsync({ OPENCLAW_SERVICE_REPAIR_POLICY: "external" }, async () => {
+      setupGatewayEntrypointRepairScenario({
+        currentEntrypoint: "/Users/test/Library/npm/node_modules/openclaw/dist/entry.js",
+        installEntrypoint: "/Users/test/Library/npm/node_modules/openclaw/dist/index.js",
+        installWorkingDirectory: "/tmp",
+      });
+
+      await runRepair({ gateway: {} });
+
+      expect(mocks.auditGatewayServiceConfig).toHaveBeenCalledTimes(1);
+      expect(mocks.note).toHaveBeenCalledWith(
+        expect.stringContaining("Gateway service entrypoint does not match the current install."),
+        "Gateway service config",
+      );
+      expect(mocks.note).toHaveBeenCalledWith(
+        EXTERNAL_SERVICE_REPAIR_NOTE,
+        "Gateway service config",
+      );
+      expect(mocks.writeConfigFile).not.toHaveBeenCalled();
+      expect(mocks.stage).not.toHaveBeenCalled();
+      expect(mocks.install).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe("maybeScanExtraGatewayServices", () => {
@@ -654,5 +801,35 @@ describe("maybeScanExtraGatewayServices", () => {
     expect(runtime.log).toHaveBeenCalledWith(
       "Legacy gateway services removed. Installing OpenClaw gateway next.",
     );
+  });
+
+  it("reports legacy services but skips cleanup when service repair policy is external", async () => {
+    await withEnvAsync({ OPENCLAW_SERVICE_REPAIR_POLICY: "external" }, async () => {
+      mocks.findExtraGatewayServices.mockResolvedValue([
+        {
+          platform: "linux",
+          label: "clawdbot-gateway.service",
+          detail: "unit: /home/test/.config/systemd/user/clawdbot-gateway.service",
+          scope: "user",
+          legacy: true,
+        },
+      ]);
+
+      const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
+      await maybeScanExtraGatewayServices({ deep: false }, runtime, makeDoctorPrompts());
+
+      expect(mocks.note).toHaveBeenCalledWith(
+        expect.stringContaining("clawdbot-gateway.service"),
+        "Other gateway-like services detected",
+      );
+      expect(mocks.note).toHaveBeenCalledWith(
+        EXTERNAL_SERVICE_REPAIR_NOTE,
+        "Legacy gateway cleanup skipped",
+      );
+      expect(mocks.uninstallLegacySystemdUnits).not.toHaveBeenCalled();
+      expect(runtime.log).not.toHaveBeenCalledWith(
+        "Legacy gateway services removed. Installing OpenClaw gateway next.",
+      );
+    });
   });
 });

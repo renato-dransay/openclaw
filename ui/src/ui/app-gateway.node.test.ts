@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_EVENT_UPDATE_AVAILABLE } from "../../../src/gateway/events.js";
 import { ConnectErrorDetailCodes } from "../../../src/gateway/protocol/connect-error-details.js";
@@ -5,10 +6,12 @@ import { connectGateway, resolveControlUiClientVersion } from "./app-gateway.ts"
 import type { GatewayHelloOk } from "./gateway.ts";
 
 const loadChatHistoryMock = vi.hoisted(() => vi.fn(async () => undefined));
+const loadControlUiBootstrapConfigMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 type GatewayClientMock = {
   start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
+  request: ReturnType<typeof vi.fn>;
   options: { clientVersion?: string };
   emitHello: (hello?: GatewayHelloOk) => void;
   emitClose: (info: {
@@ -39,6 +42,15 @@ vi.mock("./gateway.ts", async (importOriginal) => {
   class GatewayBrowserClient {
     readonly start = vi.fn();
     readonly stop = vi.fn();
+    readonly request = vi.fn(async (method: string) => {
+      if (method === "update.status") {
+        return { sentinel: null };
+      }
+      if (method === "models.authStatus") {
+        return { ts: 0, providers: [] };
+      }
+      return {};
+    });
 
     constructor(
       private opts: {
@@ -56,6 +68,7 @@ vi.mock("./gateway.ts", async (importOriginal) => {
       gatewayClientInstances.push({
         start: this.start,
         stop: this.stop,
+        request: this.request,
         options: { clientVersion: this.opts.clientVersion },
         emitHello: (hello) => {
           this.opts.onHello?.(
@@ -93,6 +106,10 @@ vi.mock("./controllers/chat.ts", async (importOriginal) => {
     loadChatHistory: loadChatHistoryMock,
   };
 });
+
+vi.mock("./controllers/control-ui-bootstrap.ts", () => ({
+  loadControlUiBootstrapConfig: loadControlUiBootstrapConfigMock,
+}));
 
 type TestGatewayHost = Parameters<typeof connectGateway>[0] & {
   chatSideResult: unknown;
@@ -140,6 +157,8 @@ function createHost(): TestGatewayHost {
     assistantAgentId: null,
     localMediaPreviewRoots: [],
     serverVersion: null,
+    pendingUpdateExpectedVersion: null,
+    updateStatusBanner: null,
     sessionKey: "main",
     chatMessages: [],
     chatQueue: [],
@@ -192,6 +211,10 @@ describe("connectGateway", () => {
   beforeEach(() => {
     gatewayClientInstances.length = 0;
     loadChatHistoryMock.mockClear();
+    loadControlUiBootstrapConfigMock.mockClear();
+    vi.stubGlobal("window", {
+      setTimeout: globalThis.setTimeout,
+    });
   });
 
   it("ignores stale client onGap callbacks after reconnect", () => {
@@ -262,6 +285,117 @@ describe("connectGateway", () => {
       currentVersion: "1.0.0",
       latestVersion: "2.0.0",
       channel: "latest",
+    });
+  });
+
+  it("clears pending update verification when the restarted version matches", async () => {
+    const host = createHost();
+    host.pendingUpdateExpectedVersion = "2.0.0";
+
+    connectGateway(host);
+    const client = gatewayClientInstances[0];
+    expect(client).toBeDefined();
+    client.request.mockImplementation(async (method: string) => {
+      if (method === "update.status") {
+        return {
+          sentinel: {
+            kind: "update",
+            status: "ok",
+            stats: {
+              after: { version: "2.0.0" },
+            },
+          },
+        };
+      }
+      return {};
+    });
+
+    client.emitHello({
+      type: "hello-ok",
+      protocol: 3,
+      server: { version: "2.0.0" },
+      snapshot: {},
+    });
+
+    await vi.waitFor(() => {
+      expect(host.pendingUpdateExpectedVersion).toBeNull();
+    });
+    expect(host.updateStatusBanner).toBeNull();
+  });
+
+  it("shows a hard error when the restarted version does not match the expected update", async () => {
+    const host = createHost();
+    host.pendingUpdateExpectedVersion = "2.0.0";
+
+    connectGateway(host);
+    const client = gatewayClientInstances[0];
+    expect(client).toBeDefined();
+    client.request.mockImplementation(async (method: string) => {
+      if (method === "update.status") {
+        return {
+          sentinel: {
+            kind: "update",
+            status: "ok",
+            stats: {
+              after: { version: "1.0.0" },
+            },
+          },
+        };
+      }
+      return {};
+    });
+
+    client.emitHello({
+      type: "hello-ok",
+      protocol: 3,
+      server: { version: "1.0.0" },
+      snapshot: {},
+    });
+
+    await vi.waitFor(() => {
+      expect(host.pendingUpdateExpectedVersion).toBeNull();
+      expect(host.updateStatusBanner?.text).toContain(
+        "Update installed but running version did not change",
+      );
+    });
+  });
+
+  it("surfaces post-restart sentinel failures after reconnect", async () => {
+    const host = createHost();
+    host.pendingUpdateExpectedVersion = "2.0.0";
+
+    connectGateway(host);
+    const client = gatewayClientInstances[0];
+    expect(client).toBeDefined();
+    client.request.mockImplementation(async (method: string) => {
+      if (method === "update.status") {
+        return {
+          sentinel: {
+            kind: "update",
+            status: "error",
+            stats: {
+              reason: "restart-unhealthy",
+              after: { version: "1.0.0" },
+            },
+          },
+        };
+      }
+      return {};
+    });
+
+    client.emitHello({
+      type: "hello-ok",
+      protocol: 3,
+      server: { version: "1.0.0" },
+      snapshot: {},
+    });
+
+    await vi.waitFor(() => {
+      expect(host.pendingUpdateExpectedVersion).toBeNull();
+      expect(host.updateStatusBanner).toEqual({
+        tone: "danger",
+        text: "Update error: restart-unhealthy. The replacement process never became healthy and the previous process stayed up.",
+      });
     });
   });
 
@@ -433,6 +567,31 @@ describe("connectGateway", () => {
     expect(host.lastErrorCode).toBe("AUTH_TOKEN_MISMATCH");
   });
 
+  it("surfaces scope-upgrade approval details instead of a dead pairing error", () => {
+    const host = createHost();
+
+    connectGateway(host);
+    const client = gatewayClientInstances[0];
+    expect(client).toBeDefined();
+
+    client.emitClose({
+      code: 4008,
+      reason: "connect failed",
+      error: {
+        code: "NOT_PAIRED",
+        message: "scope upgrade pending approval (requestId: req-123)",
+        details: {
+          code: ConnectErrorDetailCodes.PAIRING_REQUIRED,
+          reason: "scope-upgrade",
+          requestId: "req-123",
+        },
+      },
+    });
+
+    expect(host.lastErrorCode).toBe(ConnectErrorDetailCodes.PAIRING_REQUIRED);
+    expect(host.lastError).toBe("scope upgrade pending approval (requestId: req-123)");
+  });
+
   it("surfaces shutdown restart reasons before the socket closes", () => {
     const host = createHost();
 
@@ -478,6 +637,62 @@ describe("connectGateway", () => {
 
     client.emitClose({ code: 1006 });
     expect(host.lastError).toBe("disconnected (1006): no reason");
+  });
+
+  it("refreshes bootstrap config after hello", () => {
+    const host = createHost();
+
+    connectGateway(host);
+    const client = gatewayClientInstances[0];
+    expect(client).toBeDefined();
+
+    client.emitHello();
+
+    expect(loadControlUiBootstrapConfigMock).toHaveBeenCalledTimes(1);
+    expect(loadControlUiBootstrapConfigMock).toHaveBeenCalledWith(host);
+  });
+
+  it("sends queued chat aborts after reconnect before clearing pending state", async () => {
+    const host = createHost();
+    host.chatRunId = "run-main";
+    host.chatStream = "partial";
+    host.pendingAbort = { runId: "run-main", sessionKey: "main" };
+
+    connectGateway(host);
+    const client = gatewayClientInstances[0];
+    expect(client).toBeDefined();
+
+    client.emitHello();
+    await Promise.resolve();
+
+    expect(client.request).toHaveBeenCalledWith("chat.abort", {
+      sessionKey: "main",
+      runId: "run-main",
+    });
+    expect(host.pendingAbort).toBeNull();
+    expect(host.chatRunId).toBeNull();
+    expect(host.chatStream).toBeNull();
+  });
+
+  it("logs and drops stale queued chat abort failures after reconnect", async () => {
+    const host = createHost();
+    host.pendingAbort = { runId: "run-stale", sessionKey: "main" };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    connectGateway(host);
+    const client = gatewayClientInstances[0];
+    expect(client).toBeDefined();
+    const error = new Error("run already finished");
+    client.request.mockImplementationOnce(async () => {
+      throw error;
+    });
+
+    client.emitHello();
+    await Promise.resolve();
+
+    expect(host.pendingAbort).toBeNull();
+    expect(warn).toHaveBeenCalledWith("[openclaw] pending abort failed:", error);
+    warn.mockRestore();
   });
 
   it("keeps shutdown restart reasons on service restart closes", () => {

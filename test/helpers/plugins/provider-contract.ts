@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  pluginRegistrationContractRegistry,
   providerContractLoadError,
   resolveProviderContractProvidersForPluginIds,
 } from "../../../src/plugins/contracts/registry.js";
-import { loadBundledPluginPublicArtifactModuleSync } from "../../../src/plugins/public-surface-loader.js";
+import { resolveBundledExplicitProviderContractsFromPublicArtifacts } from "../../../src/plugins/provider-contract-public-artifacts.js";
 import type { ProviderPlugin } from "../../../src/plugins/types.js";
 import { installProviderPluginContractSuite } from "./provider-contract-suites.js";
 
@@ -13,62 +12,20 @@ type ProviderContractEntry = {
   provider: ProviderPlugin;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isProviderPlugin(value: unknown): value is ProviderPlugin {
+function providerMatchesManifestId(provider: ProviderPlugin, providerId: string): boolean {
   return (
-    isRecord(value) &&
-    typeof value.id === "string" &&
-    typeof value.label === "string" &&
-    Array.isArray(value.auth)
+    provider.id === providerId ||
+    (provider.aliases ?? []).includes(providerId) ||
+    (provider.hookAliases ?? []).includes(providerId)
   );
 }
-
 function resolveProviderContractProvidersFromPublicArtifact(
   pluginId: string,
 ): ProviderContractEntry[] | null {
-  let mod: Record<string, unknown>;
-  try {
-    mod = loadBundledPluginPublicArtifactModuleSync<Record<string, unknown>>({
-      dirName: pluginId,
-      artifactBasename: "provider-contract-api.js",
-    });
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message.startsWith("Unable to resolve bundled plugin public surface ")
-    ) {
-      return null;
-    }
-    throw error;
-  }
-
-  const providers: ProviderContractEntry[] = [];
-  for (const [name, exported] of Object.entries(mod).toSorted(([left], [right]) =>
-    left.localeCompare(right),
-  )) {
-    if (
-      typeof exported !== "function" ||
-      exported.length !== 0 ||
-      !name.startsWith("create") ||
-      !name.endsWith("Provider")
-    ) {
-      continue;
-    }
-    const provider = exported();
-    if (isProviderPlugin(provider)) {
-      providers.push({ pluginId, provider });
-    }
-  }
-  return providers.length > 0 ? providers : null;
+  return resolveBundledExplicitProviderContractsFromPublicArtifacts({ onlyPluginIds: [pluginId] });
 }
 
 export function describeProviderContracts(pluginId: string) {
-  const providerIds =
-    pluginRegistrationContractRegistry.find((entry) => entry.pluginId === pluginId)?.providerIds ??
-    [];
   const resolveProviderEntries = (): ProviderContractEntry[] => {
     const publicArtifactProviders = resolveProviderContractProvidersFromPublicArtifact(pluginId);
     if (publicArtifactProviders) {
@@ -79,6 +36,8 @@ export function describeProviderContracts(pluginId: string) {
       provider,
     }));
   };
+  const resolveProviderIds = (): string[] =>
+    resolveProviderEntries().map((entry) => entry.provider.id);
 
   describe(`${pluginId} provider contract registry load`, () => {
     it("loads bundled providers without import-time registry failure", () => {
@@ -88,13 +47,15 @@ export function describeProviderContracts(pluginId: string) {
     });
   });
 
-  for (const providerId of providerIds) {
+  for (const providerId of resolveProviderIds()) {
     describe(`${pluginId}:${providerId} provider contract`, () => {
       // Resolve provider entries lazily so the non-isolated extension runner
       // does not race provider contract collection against other file imports.
       installProviderPluginContractSuite({
         provider: () => {
-          const entry = resolveProviderEntries().find((entry) => entry.provider.id === providerId);
+          const entry = resolveProviderEntries().find((entry) =>
+            providerMatchesManifestId(entry.provider, providerId),
+          );
           if (!entry) {
             throw new Error(`provider contract entry missing for ${pluginId}:${providerId}`);
           }

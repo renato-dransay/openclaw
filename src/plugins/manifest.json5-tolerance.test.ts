@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadPluginManifest } from "./manifest.js";
+import { loadPluginManifest, MAX_PLUGIN_MANIFEST_BYTES } from "./manifest.js";
 import { cleanupTrackedTempDirs, makeTrackedTempDir } from "./test-helpers/fs-fixtures.js";
 
 const tempDirs: string[] = [];
@@ -111,6 +111,7 @@ describe("loadPluginManifest JSON5 tolerance", () => {
     onCommands: ["models", ""],
     onChannels: ["web", ""],
     onRoutes: ["gateway-webhook", ""],
+    onConfigPaths: ["browser", ""],
     onCapabilities: ["provider", "tool", "wat"]
   },
   setup: {
@@ -133,6 +134,7 @@ describe("loadPluginManifest JSON5 tolerance", () => {
         onCommands: ["models"],
         onChannels: ["web"],
         onRoutes: ["gateway-webhook"],
+        onConfigPaths: ["browser"],
         onCapabilities: ["provider", "tool"],
       });
       expect(result.manifest.setup).toEqual({
@@ -167,6 +169,26 @@ describe("loadPluginManifest JSON5 tolerance", () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.error).toContain("plugin manifest must be an object");
+    }
+  });
+
+  it("rejects oversized manifests before parsing", () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(
+      path.join(dir, "openclaw.plugin.json"),
+      JSON.stringify({
+        id: "too-large",
+        configSchema: { type: "object" },
+        padding: "x".repeat(MAX_PLUGIN_MANIFEST_BYTES),
+      }),
+      "utf-8",
+    );
+
+    const result = loadPluginManifest(dir, false);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("unsafe plugin manifest path");
     }
   });
 });

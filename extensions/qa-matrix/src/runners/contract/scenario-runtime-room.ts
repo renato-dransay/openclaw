@@ -24,9 +24,9 @@ import {
   createMatrixQaScenarioClient,
   isMatrixQaExactMarkerReply,
   isMatrixQaMessageLikeKind,
-  NO_REPLY_WINDOW_MS,
   primeMatrixQaActorCursor,
   primeMatrixQaDriverScenarioClient,
+  resolveMatrixQaNoReplyWindowMs,
   runAssertedDriverTopLevelScenario,
   runConfigurableTopLevelScenario,
   runDriverTopLevelMentionScenario,
@@ -42,6 +42,7 @@ type MatrixQaThreadScenarioResult = Awaited<ReturnType<typeof runThreadScenario>
 
 const MATRIX_SUBAGENT_THREAD_HOOK_ERROR_RE =
   /thread=true is unavailable because no channel plugin registered subagent_spawning hooks/i;
+const MATRIX_QA_HOT_RELOAD_RESTART_DELAY_MS = 300_000;
 
 function assertMatrixQaInReplyTarget(params: {
   actualEventId?: string;
@@ -75,10 +76,12 @@ function buildMatrixQaThreadArtifacts(result: MatrixQaThreadScenarioResult) {
 }
 
 function failIfMatrixSubagentThreadHookError(event: MatrixQaObservedEvent) {
-  if (MATRIX_SUBAGENT_THREAD_HOOK_ERROR_RE.test(event.body ?? "")) {
-    throw new Error(
-      `Matrix subagent thread spawn hit missing hook error: ${event.body ?? "<empty>"}`,
-    );
+  const body = event.body ?? "";
+  if (MATRIX_SUBAGENT_THREAD_HOOK_ERROR_RE.test(body)) {
+    throw new Error(`Matrix subagent thread spawn hit missing hook error: ${body || "<empty>"}`);
+  }
+  if (/\bsessions_spawn failed:/i.test(body)) {
+    throw new Error(`Matrix subagent thread spawn failed: ${body || "<empty>"}`);
   }
 }
 
@@ -296,9 +299,10 @@ export async function runSubagentThreadSpawnScenario(context: MatrixQaScenarioCo
   const { client, startSince } = await primeMatrixQaDriverScenarioClient(context);
   const childToken = buildMatrixQaToken("MATRIX_QA_SUBAGENT_CHILD");
   const triggerBody = [
-    `${context.sutUserId} Use sessions_spawn for this QA check.`,
-    `task="Reply exactly \`${childToken}\`. This is the marker."`,
-    "label=matrix-thread-subagent thread=true mode=session runTimeoutSeconds=30",
+    `${context.sutUserId} Call sessions_spawn now for this QA check.`,
+    `Use task="Finish with exactly ${childToken}."`,
+    "Use label=matrix-thread-subagent thread=true mode=session runTimeoutSeconds=60.",
+    "Do not send the child token from this parent session.",
   ].join(" ");
   const driverEventId = await client.sendTextMessage({
     body: triggerBody,
@@ -466,6 +470,85 @@ export async function runObserverAllowlistOverrideScenario(context: MatrixQaScen
       `trigger sender: ${context.observerUserId}`,
       `driver event: ${driverEventId}`,
       ...buildMatrixReplyDetails("reply", reply),
+    ].join("\n"),
+  } satisfies MatrixQaScenarioExecution;
+}
+
+export async function runAllowlistHotReloadScenario(context: MatrixQaScenarioContext) {
+  if (!context.patchGatewayConfig) {
+    throw new Error("Matrix allowlist hot-reload scenario requires gateway config patching");
+  }
+  const accepted = await runTopologyScopedTopLevelScenario({
+    accessToken: context.observerAccessToken,
+    actorId: "observer",
+    actorUserId: context.observerUserId,
+    context,
+    roomKey: context.topology.defaultRoomKey,
+    tokenPrefix: "MATRIX_QA_GROUP_RELOAD_ACCEPTED",
+  });
+  const accountId = context.sutAccountId ?? "sut";
+
+  await context.patchGatewayConfig(
+    {
+      channels: {
+        matrix: {
+          accounts: {
+            [accountId]: {
+              groupAllowFrom: [context.driverUserId],
+            },
+          },
+        },
+      },
+      gateway: {
+        // Isolate the Matrix handler's per-message config read from generic channel reload.
+        reload: {
+          mode: "off",
+        },
+      },
+    },
+    {
+      restartDelayMs: MATRIX_QA_HOT_RELOAD_RESTART_DELAY_MS,
+    },
+  );
+
+  const blockedToken = buildMatrixQaToken("MATRIX_QA_GROUP_RELOAD_REMOVED");
+  const removed = await runNoReplyExpectedScenario({
+    accessToken: context.observerAccessToken,
+    actorId: "observer",
+    actorUserId: context.observerUserId,
+    baseUrl: context.baseUrl,
+    body: buildMentionPrompt(context.sutUserId, blockedToken),
+    mentionUserIds: [context.sutUserId],
+    observedEvents: context.observedEvents,
+    roomId: context.roomId,
+    syncState: context.syncState,
+    syncStreams: context.syncStreams,
+    sutUserId: context.sutUserId,
+    replyPredicate: (event) =>
+      isMatrixQaExactMarkerReply(event, {
+        roomId: context.roomId,
+        sutUserId: context.sutUserId,
+        token: blockedToken,
+      }),
+    timeoutMs: resolveMatrixQaNoReplyWindowMs(context.timeoutMs),
+    token: blockedToken,
+  });
+
+  return {
+    artifacts: {
+      accepted: accepted.artifacts ?? {},
+      blocked: removed.artifacts ?? {},
+      driverEventId: accepted.artifacts?.driverEventId,
+      secondDriverEventId: removed.artifacts?.driverEventId,
+      firstReply: accepted.artifacts?.reply,
+      token: accepted.artifacts?.token,
+      triggerBody: accepted.artifacts?.triggerBody,
+    },
+    details: [
+      "group allowlist before removal:",
+      accepted.details,
+      "group allowlist after hot reload removal:",
+      removed.details,
     ].join("\n"),
   } satisfies MatrixQaScenarioExecution;
 }
@@ -684,7 +767,7 @@ export async function runMembershipLossScenario(context: MatrixQaScenarioContext
     syncState: context.syncState,
     syncStreams: context.syncStreams,
     sutUserId: context.sutUserId,
-    timeoutMs: Math.min(NO_REPLY_WINDOW_MS, context.timeoutMs),
+    timeoutMs: resolveMatrixQaNoReplyWindowMs(context.timeoutMs),
     token: noReplyToken,
   });
 

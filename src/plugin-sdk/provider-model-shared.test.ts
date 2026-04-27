@@ -183,13 +183,31 @@ describe("buildProviderReplayFamilyHooks", () => {
       OPENAI_COMPATIBLE_REPLAY_HOOKS.buildReplayPolicy?.({
         provider: "xai",
         modelApi: "openai-completions",
-        modelId: "grok-4",
+        modelId: "google/gemma-4-26b-a4b-it",
       } as never),
     ).toMatchObject({
       sanitizeToolCallIds: true,
       applyAssistantFirstOrderingFix: true,
       validateGeminiTurns: true,
+      dropReasoningFromHistory: true,
     });
+
+    const nativeIdsHooks = buildProviderReplayFamilyHooks({
+      family: "openai-compatible",
+      sanitizeToolCallIds: false,
+    });
+    const nativeIdsPolicy = nativeIdsHooks.buildReplayPolicy?.({
+      provider: "moonshot",
+      modelApi: "openai-completions",
+      modelId: "kimi-k2.6",
+    } as never);
+    expect(nativeIdsPolicy).toMatchObject({
+      applyAssistantFirstOrderingFix: true,
+      validateGeminiTurns: true,
+      validateAnthropicTurns: true,
+    });
+    expect(nativeIdsPolicy).not.toHaveProperty("sanitizeToolCallIds");
+    expect(nativeIdsPolicy).not.toHaveProperty("toolCallIdMode");
 
     expect(
       PASSTHROUGH_GEMINI_REPLAY_HOOKS.buildReplayPolicy?.({

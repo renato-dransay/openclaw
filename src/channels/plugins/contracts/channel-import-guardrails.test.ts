@@ -34,6 +34,7 @@ const GUARDED_CHANNEL_EXTENSIONS = new Set([
   "msteams",
   "nostr",
   "nextcloud-talk",
+  "qqbot",
   "signal",
   "slack",
   "synology-chat",
@@ -44,9 +45,6 @@ const GUARDED_CHANNEL_EXTENSIONS = new Set([
   "zalo",
   "zalouser",
 ]);
-// Shared config validation intentionally consumes this curated Telegram contract.
-const ALLOWED_CORE_CHANNEL_SDK_SUBPATHS = new Set(["telegram-command-config"]);
-
 function bundledPluginFile(pluginId: string, relativePath: string): string {
   const rootDir = bundledPluginRoots.get(pluginId);
   if (!rootDir) {
@@ -194,6 +192,7 @@ const LOCAL_EXTENSION_API_BARREL_GUARDS = [
   "bluebubbles",
   "device-pair",
   "diagnostics-otel",
+  "diagnostics-prometheus",
   "discord",
   "diffs",
   "feishu",
@@ -213,6 +212,7 @@ const LOCAL_EXTENSION_API_BARREL_GUARDS = [
   "open-prose",
   "phone-control",
   "copilot-proxy",
+  "qqbot",
   "sglang",
   "zai",
   "signal",
@@ -509,9 +509,6 @@ function expectCoreSourceStaysOffPluginSpecificSdkFacades(file: string, imports:
       continue;
     }
     const targetSubpath = specifier.split("/plugin-sdk/")[1]?.replace(/\.[cm]?[jt]sx?$/u, "") ?? "";
-    if (ALLOWED_CORE_CHANNEL_SDK_SUBPATHS.has(targetSubpath)) {
-      continue;
-    }
     const targetExtensionId =
       [...GUARDED_CHANNEL_EXTENSIONS].find(
         (extensionId) =>

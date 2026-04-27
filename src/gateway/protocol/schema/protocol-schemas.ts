@@ -1,4 +1,4 @@
-import type { TSchema } from "@sinclair/typebox";
+import type { TSchema } from "typebox";
 import {
   AgentEventSchema,
   AgentIdentityParamsSchema,
@@ -54,6 +54,8 @@ import {
   ChannelsLogoutParamsSchema,
   TalkConfigParamsSchema,
   TalkConfigResultSchema,
+  TalkRealtimeSessionParamsSchema,
+  TalkRealtimeSessionResultSchema,
   TalkSpeakParamsSchema,
   TalkSpeakResultSchema,
   ChannelsStatusParamsSchema,
@@ -76,6 +78,7 @@ import {
   ConfigSchemaParamsSchema,
   ConfigSchemaResponseSchema,
   ConfigSetParamsSchema,
+  UpdateStatusParamsSchema,
   UpdateRunParamsSchema,
 } from "./config.js";
 import {
@@ -279,6 +282,8 @@ export const ProtocolSchemas = {
   TalkModeParams: TalkModeParamsSchema,
   TalkConfigParams: TalkConfigParamsSchema,
   TalkConfigResult: TalkConfigResultSchema,
+  TalkRealtimeSessionParams: TalkRealtimeSessionParamsSchema,
+  TalkRealtimeSessionResult: TalkRealtimeSessionResultSchema,
   TalkSpeakParams: TalkSpeakParamsSchema,
   TalkSpeakResult: TalkSpeakResultSchema,
   ChannelsStatusParams: ChannelsStatusParamsSchema,
@@ -361,6 +366,7 @@ export const ProtocolSchemas = {
   ChatAbortParams: ChatAbortParamsSchema,
   ChatInjectParams: ChatInjectParamsSchema,
   ChatEvent: ChatEventSchema,
+  UpdateStatusParams: UpdateStatusParamsSchema,
   UpdateRunParams: UpdateRunParamsSchema,
   TickEvent: TickEventSchema,
   ShutdownEvent: ShutdownEventSchema,

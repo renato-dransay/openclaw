@@ -175,9 +175,28 @@ export function normalizeLmstudioProviderConfig(
     return provider;
   }
   const normalizedBaseUrl = resolveLmstudioInferenceBase(configuredBaseUrl);
-  return normalizedBaseUrl === provider.baseUrl
-    ? provider
-    : { ...provider, baseUrl: normalizedBaseUrl };
+  const request =
+    provider.request && typeof provider.request === "object" && !Array.isArray(provider.request)
+      ? provider.request
+      : undefined;
+  const requestWithPrivateNetworkDefault =
+    typeof request?.allowPrivateNetwork === "boolean"
+      ? request
+      : {
+          ...request,
+          allowPrivateNetwork: true,
+        };
+  if (
+    normalizedBaseUrl === provider.baseUrl &&
+    requestWithPrivateNetworkDefault === provider.request
+  ) {
+    return provider;
+  }
+  return {
+    ...provider,
+    baseUrl: normalizedBaseUrl,
+    request: requestWithPrivateNetworkDefault,
+  };
 }
 
 export function normalizeLmstudioConfiguredCatalogEntry(
@@ -269,7 +288,7 @@ export type LmstudioModelBase = {
   trainedForToolUse: boolean;
   loaded: boolean;
   reasoning: boolean;
-  input: ModelDefinitionConfig["input"];
+  input: Array<"text" | "image">;
   cost: ModelDefinitionConfig["cost"];
   contextWindow: number;
   contextTokens: number;

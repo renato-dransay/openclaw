@@ -12,7 +12,7 @@ export function createInboundSlackTestContext(params: {
   cfg: OpenClawConfig;
   appClient?: App["client"];
   defaultRequireMention?: boolean;
-  replyToMode?: "off" | "all" | "first";
+  replyToMode?: "off" | "all" | "first" | "batched";
   channelsConfig?: SlackChannelConfigEntries;
   threadRequireExplicitMention?: boolean;
 }) {
@@ -23,6 +23,7 @@ export function createInboundSlackTestContext(params: {
     app: { client: params.appClient ?? {} } as App,
     runtime: {} as RuntimeEnv,
     botUserId: "B1",
+    botId: "B1",
     teamId: "T1",
     apiAppId: "A1",
     historyLimit: 0,

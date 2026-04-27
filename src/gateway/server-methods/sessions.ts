@@ -72,6 +72,7 @@ import {
   loadSessionEntry,
   migrateAndPruneGatewaySessionStoreKey,
   readSessionPreviewItemsFromTranscript,
+  resolveDeletedAgentIdFromSessionKey,
   resolveFreshestSessionEntryFromStoreKeys,
   resolveGatewaySessionStoreTarget,
   resolveSessionModelRef,
@@ -117,6 +118,30 @@ function requireSessionKey(key: unknown, respond: RespondFn): string | null {
     return null;
   }
   return normalized;
+}
+
+function rejectPluginRuntimeDeleteMismatch(params: {
+  client: GatewayClient | null;
+  key: string;
+  entry: SessionEntry | undefined;
+  respond: RespondFn;
+}): boolean {
+  const pluginOwnerId = normalizeOptionalString(params.client?.internal?.pluginRuntimeOwnerId);
+  if (!pluginOwnerId || !params.entry) {
+    return false;
+  }
+  if (normalizeOptionalString(params.entry.pluginOwnerId) === pluginOwnerId) {
+    return false;
+  }
+  params.respond(
+    false,
+    undefined,
+    errorShape(
+      ErrorCodes.INVALID_REQUEST,
+      `Plugin "${pluginOwnerId}" cannot delete session "${params.key}" because it did not create it.`,
+    ),
+  );
+  return true;
 }
 
 function resolveGatewaySessionTargetFromKey(key: string) {
@@ -222,7 +247,7 @@ function emitSessionsChanged(
 }
 
 function rejectWebchatSessionMutation(params: {
-  action: "patch" | "delete";
+  action: "patch" | "delete" | "compact" | "restore";
   client: GatewayClient | null;
   isWebchatConnect: (params: GatewayClient["connect"] | null | undefined) => boolean;
   respond: RespondFn;
@@ -461,7 +486,20 @@ async function handleSessionSend(params: {
   if (!key) {
     return;
   }
-  const { entry, canonicalKey, storePath } = loadSessionEntry(key);
+  const { cfg, entry, canonicalKey, storePath } = loadSessionEntry(key);
+  // Reject sends/steers targeting sessions whose owning agent was deleted (#65524).
+  const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, canonicalKey);
+  if (deletedAgentId !== null) {
+    params.respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        `Agent "${deletedAgentId}" no longer exists in configuration`,
+      ),
+    );
+    return;
+  }
   if (!entry?.sessionId) {
     params.respond(
       false,
@@ -1087,6 +1125,9 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     if (!key) {
       return;
     }
+    if (rejectWebchatSessionMutation({ action: "restore", client, isWebchatConnect, respond })) {
+      return;
+    }
     const checkpointId =
       typeof p.checkpointId === "string" && p.checkpointId.trim() ? p.checkpointId.trim() : "";
     if (!checkpointId) {
@@ -1389,6 +1430,9 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     } = await loadSessionsRuntimeModule();
 
     const { entry, legacyKey, canonicalKey } = loadSessionEntry(key);
+    if (rejectPluginRuntimeDeleteMismatch({ client, key: canonicalKey ?? key, entry, respond })) {
+      return;
+    }
     const mutationCleanupError = await cleanupSessionBeforeMutation({
       cfg,
       key,
@@ -1481,6 +1525,9 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     if (!key) {
       return;
     }
+    if (rejectWebchatSessionMutation({ action: "compact", client, isWebchatConnect, respond })) {
+      return;
+    }
 
     const maxLines =
       typeof p.maxLines === "number" && Number.isFinite(p.maxLines)
@@ -1557,6 +1604,7 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         config: cfg,
         provider: resolvedModel.provider,
         model: resolvedModel.model,
+        agentHarnessId: entry?.sessionId === sessionId ? entry.agentHarnessId : undefined,
         thinkLevel: normalizeThinkLevel(entry?.thinkingLevel),
         reasoningLevel: normalizeReasoningLevel(entry?.reasoningLevel),
         bashElevated: {
@@ -1576,6 +1624,12 @@ export const sessionsHandlers: GatewayRequestHandlers = {
           }
           entryToUpdate.updatedAt = Date.now();
           entryToUpdate.compactionCount = Math.max(0, entryToUpdate.compactionCount ?? 0) + 1;
+          if (result.result?.sessionId && result.result.sessionId !== entryToUpdate.sessionId) {
+            entryToUpdate.sessionId = result.result.sessionId;
+          }
+          if (result.result?.sessionFile) {
+            entryToUpdate.sessionFile = result.result.sessionFile;
+          }
           delete entryToUpdate.inputTokens;
           delete entryToUpdate.outputTokens;
           if (

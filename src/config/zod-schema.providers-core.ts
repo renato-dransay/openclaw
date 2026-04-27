@@ -82,6 +82,7 @@ const ChannelStreamingBlockSchema = z
 const ChannelStreamingPreviewSchema = z
   .object({
     chunk: BlockStreamingChunkSchema.optional(),
+    toolProgress: z.boolean().optional(),
   })
   .strict();
 const ChannelPreviewStreamingConfigSchema = z
@@ -240,6 +241,7 @@ export const TelegramAccountSchemaBase = z
     streaming: ChannelPreviewStreamingConfigSchema.optional(),
     mediaMaxMb: z.number().positive().optional(),
     timeoutSeconds: z.number().int().positive().optional(),
+    pollingStallThresholdMs: z.number().int().min(30_000).max(600_000).optional(),
     retry: RetryConfigSchema,
     network: z
       .object({
@@ -437,6 +439,12 @@ export const DiscordDmSchema = z
   })
   .strict();
 
+export const DiscordThreadSchema = z
+  .object({
+    inheritParent: z.boolean().optional(),
+  })
+  .strict();
+
 export const DiscordGuildChannelSchema = z
   .object({
     requireMention: z.boolean().optional(),
@@ -501,6 +509,7 @@ const DiscordVoiceAutoJoinSchema = z
 const DiscordVoiceSchema = z
   .object({
     enabled: z.boolean().optional(),
+    model: z.string().min(1).optional(),
     autoJoin: z.array(DiscordVoiceAutoJoinSchema).optional(),
     daveEncryption: z.boolean().optional(),
     decryptionFailureTolerance: z.number().int().min(0).optional(),
@@ -556,6 +565,7 @@ export const DiscordAccountSchema = z
       .strict()
       .optional(),
     replyToMode: ReplyToModeSchema.optional(),
+    thread: DiscordThreadSchema.optional(),
     // Aliases for channels.discord.dm.policy / channels.discord.dm.allowFrom. Prefer these for
     // inheritance in multi-account setups (shallow merge works; nested dm object doesn't).
     dmPolicy: DmPolicySchema.optional(),
@@ -1441,6 +1451,7 @@ export const BlueBubblesAccountSchemaBase = z
     dmHistoryLimit: z.number().int().min(0).optional(),
     dms: z.record(z.string(), DmConfigSchema.optional()).optional(),
     textChunkLimit: z.number().int().positive().optional(),
+    sendTimeoutMs: z.number().int().positive().optional(),
     chunkMode: z.enum(["length", "newline"]).optional(),
     mediaMaxMb: z.number().int().positive().optional(),
     mediaLocalRoots: z.array(z.string()).optional(),
@@ -1458,6 +1469,7 @@ export const BlueBubblesAccountSchemaBase = z
     heartbeat: ChannelHeartbeatVisibilitySchema,
     healthMonitor: ChannelHealthMonitorSchema,
     responsePrefix: z.string().optional(),
+    coalesceSameSenderDms: z.boolean().optional(),
   })
   .strict();
 

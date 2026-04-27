@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-vi.mock("@sinclair/typebox", () => ({
+vi.mock("typebox", () => ({
   Type: {
     Object: (schema: unknown) => schema,
     String: (schema?: unknown) => schema,
@@ -155,6 +155,17 @@ describe("llm-task tool (json-only)", () => {
     expect(call.model).toBe("claude-4-sonnet");
   });
 
+  it("accepts model overrides that already include the selected provider prefix", async () => {
+    mockEmbeddedRunJson({ ok: true });
+    const call = await executeEmbeddedRun({
+      prompt: "x",
+      provider: "anthropic",
+      model: "anthropic/claude-4-sonnet",
+    });
+    expect(call.provider).toBe("anthropic");
+    expect(call.model).toBe("claude-4-sonnet");
+  });
+
   it("passes thinking override to embedded runner", async () => {
     mockEmbeddedRunJson({ ok: true });
     const call = await executeEmbeddedRun({ prompt: "x", thinking: "high" });
@@ -178,7 +189,7 @@ describe("llm-task tool (json-only)", () => {
   it("throws on unsupported xhigh thinking level", async () => {
     const tool = createLlmTaskTool(fakeApi());
     await expect(tool.execute("id", { prompt: "x", thinking: "xhigh" })).rejects.toThrow(
-      /only supported/i,
+      /not supported/i,
     );
   });
 

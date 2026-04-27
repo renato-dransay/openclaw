@@ -20,6 +20,7 @@ export {
   listSpawnedSessionKeys,
   looksLikeSessionId,
   looksLikeSessionKey,
+  resolveCurrentSessionClientAlias,
   resolveDisplaySessionKey,
   resolveInternalSessionKey,
   resolveMainSessionAlias,
@@ -50,6 +51,7 @@ export type SessionRunStatus = "running" | "done" | "failed" | "killed" | "timeo
 
 export type SessionListRow = {
   key: string;
+  agentId?: string;
   kind: SessionKind;
   channel: string;
   origin?: {
@@ -59,6 +61,8 @@ export type SessionListRow = {
   spawnedBy?: string;
   label?: string;
   displayName?: string;
+  derivedTitle?: string;
+  lastMessagePreview?: string;
   parentSessionKey?: string;
   deliveryContext?: SessionListDeliveryContext;
   updatedAt?: number | null;

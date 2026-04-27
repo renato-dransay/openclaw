@@ -24,6 +24,10 @@ export type RealtimeVoiceToolCallEvent = {
   args: unknown;
 };
 
+export type RealtimeVoiceToolResultOptions = {
+  willContinue?: boolean;
+};
+
 export type RealtimeVoiceBridgeCallbacks = {
   onAudio: (muLaw: Buffer) => void;
   onClearAudio: () => void;
@@ -53,13 +57,30 @@ export type RealtimeVoiceBridgeCreateRequest = RealtimeVoiceBridgeCallbacks & {
   tools?: RealtimeVoiceTool[];
 };
 
+export type RealtimeVoiceBrowserSessionCreateRequest = {
+  providerConfig: RealtimeVoiceProviderConfig;
+  instructions?: string;
+  tools?: RealtimeVoiceTool[];
+  model?: string;
+  voice?: string;
+};
+
+export type RealtimeVoiceBrowserSession = {
+  provider: RealtimeVoiceProviderId;
+  clientSecret: string;
+  model?: string;
+  voice?: string;
+  expiresAt?: number;
+};
+
 export type RealtimeVoiceBridge = {
+  supportsToolResultContinuation?: boolean;
   connect(): Promise<void>;
   sendAudio(audio: Buffer): void;
   setMediaTimestamp(ts: number): void;
   sendUserMessage?(text: string): void;
   triggerGreeting?(instructions?: string): void;
-  submitToolResult(callId: string, result: unknown): void;
+  submitToolResult(callId: string, result: unknown, options?: RealtimeVoiceToolResultOptions): void;
   acknowledgeMark(): void;
   close(): void;
   isConnected(): boolean;

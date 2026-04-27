@@ -5,6 +5,13 @@ import type {
   AnyAgentTool,
   AgentHarness,
   MediaUnderstandingProviderPlugin,
+  MigrationApplyResult,
+  MigrationDetection,
+  MigrationItem,
+  MigrationPlan,
+  MigrationProviderContext,
+  MigrationProviderPlugin,
+  MigrationSummary,
   OpenClawPluginApi,
   OpenClawPluginCommandDefinition,
   OpenClawPluginConfigSchema,
@@ -63,12 +70,16 @@ import type {
   ProviderTransportTurnState,
   ProviderToolSchemaDiagnostic,
   ProviderResolveUsageAuthContext,
+  ProviderThinkingProfile,
   ProviderThinkingPolicyContext,
   ProviderValidateReplayTurnsContext,
   ProviderWebSocketSessionPolicy,
   ProviderWrapStreamFnContext,
+  OpenClawGatewayDiscoveryAdvertiseContext,
+  OpenClawGatewayDiscoveryService,
   SpeechProviderPlugin,
   PluginCommandContext,
+  PluginCommandResult,
 } from "../plugins/types.js";
 import { createCachedLazyValueGetter } from "./lazy-value.js";
 
@@ -76,6 +87,13 @@ export type {
   AnyAgentTool,
   AgentHarness,
   MediaUnderstandingProviderPlugin,
+  MigrationApplyResult,
+  MigrationDetection,
+  MigrationItem,
+  MigrationPlan,
+  MigrationProviderContext,
+  MigrationProviderPlugin,
+  MigrationSummary,
   OpenClawPluginApi,
   OpenClawPluginNodeHostCommand,
   OpenClawPluginReloadRegistration,
@@ -84,6 +102,7 @@ export type {
   OpenClawPluginToolContext,
   OpenClawPluginToolFactory,
   PluginCommandContext,
+  PluginCommandResult,
   OpenClawPluginConfigSchema,
   ProviderDiscoveryContext,
   ProviderCatalogContext,
@@ -119,6 +138,7 @@ export type {
   ProviderPrepareRuntimeAuthContext,
   ProviderSanitizeReplayHistoryContext,
   ProviderResolveUsageAuthContext,
+  ProviderThinkingProfile,
   ProviderResolveDynamicModelContext,
   ProviderResolveTransportTurnStateContext,
   ProviderResolveWebSocketSessionPolicyContext,
@@ -130,6 +150,8 @@ export type {
   ProviderValidateReplayTurnsContext,
   ProviderWebSocketSessionPolicy,
   ProviderWrapStreamFnContext,
+  OpenClawGatewayDiscoveryAdvertiseContext,
+  OpenClawGatewayDiscoveryService,
   OpenClawPluginService,
   OpenClawPluginServiceContext,
   ProviderAuthContext,
@@ -141,6 +163,17 @@ export type {
   OpenClawPluginDefinition,
   PluginLogger,
 };
+export type {
+  PluginConversationBinding,
+  PluginConversationBindingResolvedEvent,
+  PluginConversationBindingRequestParams,
+  PluginConversationBindingRequestResult,
+} from "../plugins/conversation-binding.types.js";
+export type {
+  PluginHookInboundClaimContext,
+  PluginHookInboundClaimEvent,
+  PluginHookInboundClaimResult,
+} from "../plugins/hook-types.js";
 export type { ProviderRuntimeModel } from "../plugins/provider-runtime-model.types.js";
 export type { OpenClawConfig };
 

@@ -6,6 +6,7 @@ import {
   type ThinkLevel,
   type VerboseLevel,
 } from "../../auto-reply/thinking.js";
+import { resolveSessionLifecycleTimestamps } from "../../config/sessions/lifecycle.js";
 import {
   resolveAgentIdFromSessionKey,
   resolveExplicitAgentSessionKey,
@@ -58,6 +59,7 @@ function collectSessionIdMatchesForRequest(opts: {
   storePath: string;
   storeAgentId?: string;
   sessionId: string;
+  searchOtherAgentStores: boolean;
 }): SessionIdMatchSet {
   const matches: Array<[string, SessionEntry]> = [];
   const primaryStoreMatches: Array<[string, SessionEntry]> = [];
@@ -85,6 +87,10 @@ function collectSessionIdMatchesForRequest(opts: {
   };
 
   addMatches(opts.sessionStore, opts.storePath, { primary: true });
+  if (!opts.searchOtherAgentStores) {
+    return { matches, primaryStoreMatches, storeByKey };
+  }
+
   for (const agentId of listAgentIds(opts.cfg)) {
     if (agentId === opts.storeAgentId) {
       continue;
@@ -157,11 +163,15 @@ export function resolveSessionKeyForRequest(opts: {
 
   const explicitSessionKey =
     opts.sessionKey?.trim() ||
-    resolveExplicitAgentSessionKey({
-      cfg: opts.cfg,
-      agentId: opts.agentId,
-    });
-  const storeAgentId = resolveAgentIdFromSessionKey(explicitSessionKey);
+    (!requestedSessionId
+      ? resolveExplicitAgentSessionKey({
+          cfg: opts.cfg,
+          agentId: requestedAgentId,
+        })
+      : undefined);
+  const storeAgentId = explicitSessionKey
+    ? resolveAgentIdFromSessionKey(explicitSessionKey)
+    : (requestedAgentId ?? normalizeAgentId(undefined));
   const storePath = resolveStorePath(sessionCfg?.store, {
     agentId: storeAgentId,
   });
@@ -176,22 +186,23 @@ export function resolveSessionKeyForRequest(opts: {
   // by the shared gateway/session resolver helpers instead of whichever store happens to be scanned
   // first.
   if (
-    opts.sessionId &&
+    requestedSessionId &&
     !explicitSessionKey &&
-    (!sessionKey || sessionStore[sessionKey]?.sessionId !== opts.sessionId)
+    (!sessionKey || sessionStore[sessionKey]?.sessionId !== requestedSessionId)
   ) {
     const { matches, primaryStoreMatches, storeByKey } = collectSessionIdMatchesForRequest({
       cfg: opts.cfg,
       sessionStore,
       storePath,
       storeAgentId,
-      sessionId: opts.sessionId,
+      sessionId: requestedSessionId,
+      searchOtherAgentStores: requestedAgentId === undefined,
     });
-    const preferredSelection = resolveSessionIdMatchSelection(matches, opts.sessionId);
+    const preferredSelection = resolveSessionIdMatchSelection(matches, requestedSessionId);
     const currentStoreSelection =
       preferredSelection.kind === "selected"
         ? preferredSelection
-        : resolveSessionIdMatchSelection(primaryStoreMatches, opts.sessionId);
+        : resolveSessionIdMatchSelection(primaryStoreMatches, requestedSessionId);
     if (currentStoreSelection.kind === "selected") {
       const preferred = storeByKey.get(currentStoreSelection.sessionKey);
       if (preferred) {
@@ -201,9 +212,9 @@ export function resolveSessionKeyForRequest(opts: {
     }
   }
 
-  if (opts.sessionId && !sessionKey) {
+  if (requestedSessionId && !sessionKey) {
     sessionKey = buildExplicitSessionIdSessionKey({
-      sessionId: opts.sessionId,
+      sessionId: requestedSessionId,
       agentId: opts.agentId,
     });
   }
@@ -241,8 +252,16 @@ export function resolveSession(opts: {
     resetOverride: channelReset,
   });
   const fresh = sessionEntry
-    ? evaluateSessionFreshness({ updatedAt: sessionEntry.updatedAt, now, policy: resetPolicy })
-        .fresh
+    ? evaluateSessionFreshness({
+        updatedAt: sessionEntry.updatedAt,
+        ...resolveSessionLifecycleTimestamps({
+          entry: sessionEntry,
+          agentId: opts.agentId,
+          storePath,
+        }),
+        now,
+        policy: resetPolicy,
+      }).fresh
     : false;
   const sessionId =
     opts.sessionId?.trim() || (fresh ? sessionEntry?.sessionId : undefined) || crypto.randomUUID();

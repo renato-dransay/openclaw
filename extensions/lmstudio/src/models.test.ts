@@ -8,6 +8,7 @@ import { discoverLmstudioModels, ensureLmstudioModelLoaded } from "./models.fetc
 import {
   normalizeLmstudioProviderConfig,
   resolveLmstudioInferenceBase,
+  resolveLmstudioReasoningCompat,
   resolveLmstudioReasoningCapability,
   resolveLmstudioServerBase,
 } from "./models.js";
@@ -145,6 +146,57 @@ describe("lmstudio-models", () => {
     ).toBe(false);
   });
 
+  it("maps LM Studio binary reasoning options into OpenAI-compatible effort compat", () => {
+    expect(
+      resolveLmstudioReasoningCompat({
+        capabilities: {
+          reasoning: {
+            allowed_options: ["off", "on"],
+            default: "on",
+          },
+        },
+      }),
+    ).toEqual({
+      supportsReasoningEffort: true,
+      supportedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      reasoningEffortMap: expect.objectContaining({
+        off: "none",
+        none: "none",
+        adaptive: "xhigh",
+        max: "xhigh",
+      }),
+    });
+
+    expect(
+      resolveLmstudioReasoningCompat({
+        capabilities: {
+          reasoning: {
+            allowed_options: ["low", "medium", "high"],
+            default: "low",
+          },
+        },
+      }),
+    ).toEqual({
+      supportsReasoningEffort: true,
+      supportedReasoningEfforts: ["low", "medium", "high"],
+      reasoningEffortMap: expect.objectContaining({
+        adaptive: "high",
+        max: "high",
+      }),
+    });
+
+    expect(
+      resolveLmstudioReasoningCompat({
+        capabilities: {
+          reasoning: {
+            allowed_options: ["off"],
+            default: "off",
+          },
+        },
+      }),
+    ).toBeUndefined();
+  });
+
   it("discovers llm models and maps metadata", async () => {
     const fetchMock = vi.fn(async (_url: string | URL) => ({
       ok: true,
@@ -205,7 +257,17 @@ describe("lmstudio-models", () => {
       reasoning: true,
       input: ["text", "image"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      compat: { supportsUsageInStreaming: true },
+      compat: {
+        supportsUsageInStreaming: true,
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: ["none", "minimal", "low", "medium", "high", "xhigh"],
+        reasoningEffortMap: expect.objectContaining({
+          off: "none",
+          none: "none",
+          adaptive: "xhigh",
+          max: "xhigh",
+        }),
+      },
       contextWindow: 262144,
       contextTokens: LMSTUDIO_DEFAULT_LOAD_CONTEXT_LENGTH,
       maxTokens: SELF_HOSTED_DEFAULT_MAX_TOKENS,

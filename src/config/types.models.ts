@@ -50,16 +50,16 @@ type SupportedAnthropicMessagesCompatFields = Pick<
 >;
 
 type SupportedThinkingFormat =
-  | NonNullable<OpenAICompletionsCompat["thinkingFormat"]>
+  | Exclude<NonNullable<OpenAICompletionsCompat["thinkingFormat"]>, "qwen" | "qwen-chat-template">
   | "deepseek"
-  | "openrouter"
-  | "qwen-chat-template";
+  | "openrouter";
 
 export type ModelCompatConfig = SupportedOpenAICompatFields &
   SupportedOpenAIResponsesCompatFields &
   SupportedAnthropicMessagesCompatFields & {
     thinkingFormat?: SupportedThinkingFormat;
     supportedReasoningEfforts?: string[];
+    reasoningEffortMap?: Record<string, string>;
     visibleReasoningDetailTypes?: string[];
     supportsTools?: boolean;
     supportsPromptCacheKey?: boolean;
@@ -124,6 +124,8 @@ export type ModelProviderConfig = {
   maxTokens?: number;
   timeoutSeconds?: number;
   injectNumCtxForOpenAICompat?: boolean;
+  /** Provider-specific runtime parameters interpreted by provider plugins. */
+  params?: Record<string, unknown>;
   headers?: Record<string, SecretInput>;
   authHeader?: boolean;
   request?: ConfiguredModelProviderRequest;
@@ -143,13 +145,32 @@ export type DiscoveryToggleConfig = {
   enabled?: boolean;
 };
 
+export type ModelPricingConfig = {
+  enabled?: boolean;
+};
+
 export type ModelsConfig = {
   mode?: "merge" | "replace";
   providers?: Record<string, ModelProviderConfig>;
-  // Deprecated legacy compat aliases. Kept in the runtime type surface so
-  // doctor/runtime fallbacks can read older configs until migration completes.
+  pricing?: ModelPricingConfig;
+  /**
+   * @deprecated Legacy compat alias. Kept so doctor/runtime fallbacks can read
+   * older configs until migration completes.
+   */
   bedrockDiscovery?: BedrockDiscoveryConfig;
+  /**
+   * @deprecated Legacy compat alias. Kept so doctor/runtime fallbacks can read
+   * older configs until migration completes.
+   */
   copilotDiscovery?: DiscoveryToggleConfig;
+  /**
+   * @deprecated Legacy compat alias. Kept so doctor/runtime fallbacks can read
+   * older configs until migration completes.
+   */
   huggingfaceDiscovery?: DiscoveryToggleConfig;
+  /**
+   * @deprecated Legacy compat alias. Kept so doctor/runtime fallbacks can read
+   * older configs until migration completes.
+   */
   ollamaDiscovery?: DiscoveryToggleConfig;
 };

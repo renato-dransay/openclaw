@@ -1,12 +1,14 @@
-// Private helper surface for the bundled mattermost plugin.
-// Keep this list additive and scoped to the bundled Mattermost surface.
-
-export { formatInboundFromLabel } from "../auto-reply/envelope.js";
-export type { HistoryEntry } from "../auto-reply/reply/history.js";
+/**
+ * @deprecated Compatibility facade for older third-party channel packages that
+ * imported the previous Mattermost-shaped helper bundle. New plugins should
+ * import the generic SDK subpaths directly.
+ */
+export { resolveControlCommandGate } from "./command-auth.js";
+export { formatPairingApproveHint } from "./channel-plugin-common.js";
+export type { HistoryEntry } from "./reply-history.js";
 export {
   buildPendingHistoryContextFromMap,
   clearHistoryEntriesIfEnabled,
-  DEFAULT_GROUP_HISTORY_LIMIT,
   recordPendingHistoryEntryIfEnabled,
 } from "../auto-reply/reply/history.js";
 export { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";

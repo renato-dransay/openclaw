@@ -47,11 +47,32 @@ const { registerPluginsCli, registerPluginCliCommandsFromValidatedConfig } = vi.
   }),
   registerPluginCliCommandsFromValidatedConfig: vi.fn(async () => null),
 }));
+const { registerChannelsCli } = vi.hoisted(() => ({
+  registerChannelsCli: vi.fn(async () => undefined),
+}));
+const { addGatewayRunCommand, gatewayRunAction, registerGatewayCli } = vi.hoisted(() => {
+  const runAction = vi.fn();
+  return {
+    addGatewayRunCommand: vi.fn((command: Command) =>
+      command.option("--force", "force", false).action(runAction),
+    ),
+    gatewayRunAction: runAction,
+    registerGatewayCli: vi.fn((program: Command) => {
+      program
+        .command("gateway")
+        .command("call")
+        .action(() => undefined);
+    }),
+  };
+});
 
 vi.mock("../acp-cli.js", () => ({ registerAcpCli }));
+vi.mock("../gateway-cli.js", () => ({ registerGatewayCli }));
+vi.mock("../gateway-cli/run.js", () => ({ addGatewayRunCommand }));
 vi.mock("../nodes-cli.js", () => ({ registerNodesCli }));
 vi.mock("../capability-cli.js", () => ({ registerCapabilityCli }));
 vi.mock("../plugins-cli.js", () => ({ registerPluginsCli }));
+vi.mock("../channels-cli.js", () => ({ registerChannelsCli }));
 vi.mock("../../plugins/cli.js", () => ({ registerPluginCliCommandsFromValidatedConfig }));
 vi.mock("./private-qa-cli.js", async () => {
   const actual = await vi.importActual<typeof import("./private-qa-cli.js")>("./private-qa-cli.js");
@@ -93,6 +114,10 @@ describe("registerSubCliCommands", () => {
     inferAction.mockClear();
     registerPluginsCli.mockClear();
     registerPluginCliCommandsFromValidatedConfig.mockClear();
+    registerChannelsCli.mockClear();
+    addGatewayRunCommand.mockClear();
+    gatewayRunAction.mockClear();
+    registerGatewayCli.mockClear();
   });
 
   afterEach(() => {
@@ -172,6 +197,41 @@ describe("registerSubCliCommands", () => {
     await program.parseAsync(["acp"], { from: "user" });
     expect(registerAcpCli).toHaveBeenCalledTimes(1);
     expect(acpAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers only the gateway run surface for gateway startup", async () => {
+    const argv = ["node", "openclaw", "gateway", "--force"];
+    process.argv = argv;
+    const program = new Command().name("openclaw");
+
+    await registerSubCliByName(program, "gateway", argv);
+
+    expect(addGatewayRunCommand).toHaveBeenCalledTimes(2);
+    expect(registerGatewayCli).not.toHaveBeenCalled();
+    await program.parseAsync(["gateway", "--force"], { from: "user" });
+    expect(gatewayRunAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the full gateway CLI for non-run gateway subcommands", async () => {
+    const argv = ["node", "openclaw", "gateway", "call", "health"];
+    process.argv = argv;
+    const program = new Command().name("openclaw");
+
+    await registerSubCliByName(program, "gateway", argv);
+
+    expect(addGatewayRunCommand).not.toHaveBeenCalled();
+    expect(registerGatewayCli).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes completion context to channel registration", async () => {
+    const argv = ["node", "openclaw", "completion", "--write-state"];
+    const program = new Command().name("openclaw");
+
+    await registerSubCliByName(program, "channels", argv, { purpose: "completion" });
+
+    expect(registerChannelsCli).toHaveBeenCalledWith(program, argv, {
+      includeSetupOptions: true,
+    });
   });
 
   it.each([

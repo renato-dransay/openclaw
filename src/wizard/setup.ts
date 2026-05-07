@@ -8,7 +8,7 @@ import type {
   OnboardOptions,
   ResetScope,
 } from "../commands/onboard-types.js";
-import { createConfigIO, resolveGatewayPort, writeConfigFile } from "../config/config.js";
+import { createConfigIO, replaceConfigFile, resolveGatewayPort } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizeSecretInputString } from "../config/types.secrets.js";
 import { formatErrorMessage } from "../infra/errors.js";
@@ -57,10 +57,13 @@ function loadModelPickerModule(): Promise<ModelPickerModule> {
 async function writeWizardConfigFile(config: OpenClawConfig): Promise<OpenClawConfig> {
   const committed = await commitConfigWriteWithPendingPluginInstalls({
     nextConfig: config,
-    commit: async (nextConfig, writeOptions) =>
-      writeOptions
-        ? await writeConfigFile(nextConfig, writeOptions)
-        : await writeConfigFile(nextConfig),
+    commit: async (nextConfig, writeOptions) => {
+      await replaceConfigFile({
+        nextConfig,
+        writeOptions: { ...writeOptions, allowConfigSizeDrop: true },
+        afterWrite: { mode: "auto" },
+      });
+    },
   });
   return committed.config;
 }
@@ -323,7 +326,7 @@ export async function runSetupWizard(
       detections: migrationDetections,
       prompter,
       runtime,
-      writeConfigFile: writeWizardConfigFile,
+      commitConfigFile: writeWizardConfigFile,
     });
     return;
   }
@@ -737,6 +740,7 @@ export async function runSetupWizard(
   logConfigUpdated(runtime);
   await onboardHelpers.ensureWorkspaceAndSessions(workspaceDir, runtime, {
     skipBootstrap: Boolean(nextConfig.agents?.defaults?.skipBootstrap),
+    skipOptionalBootstrapFiles: nextConfig.agents?.defaults?.skipOptionalBootstrapFiles,
   });
 
   if (opts.skipSearch) {
@@ -758,6 +762,13 @@ export async function runSetupWizard(
 
   // Plugin configuration (sandbox backends, tool plugins, etc.)
   if (flow !== "quickstart") {
+    const { setupOfficialPluginInstalls } = await import("./setup.official-plugins.js");
+    nextConfig = await setupOfficialPluginInstalls({
+      config: nextConfig,
+      prompter,
+      runtime,
+      workspaceDir,
+    });
     const { setupPluginConfig } = await import("./setup.plugin-config.js");
     nextConfig = await setupPluginConfig({
       config: nextConfig,

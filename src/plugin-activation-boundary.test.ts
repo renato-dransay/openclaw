@@ -19,7 +19,7 @@ const loadBundledPluginPublicSurfaceModuleSync = vi.hoisted(() =>
   }),
 );
 
-const loadPluginManifestRegistry = vi.hoisted(() =>
+const loadPluginManifestRegistryForPluginRegistry = vi.hoisted(() =>
   vi.fn(() => ({
     diagnostics: [],
     plugins: [
@@ -78,8 +78,13 @@ const facadeMockHelpers = vi.hoisted(() => {
   return { createLazyFacadeArrayValue, createLazyFacadeObjectValue };
 });
 
-vi.mock("./plugins/manifest-registry.js", () => ({
-  loadPluginManifestRegistry,
+vi.mock("./plugins/plugin-registry.js", () => ({
+  loadPluginManifestRegistryForPluginRegistry,
+  loadPluginRegistrySnapshotWithMetadata: () => ({
+    source: "derived",
+    snapshot: { plugins: [] },
+    diagnostics: [],
+  }),
 }));
 
 vi.mock("./secrets/channel-env-vars.js", () => ({

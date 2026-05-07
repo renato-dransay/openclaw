@@ -3,8 +3,6 @@
  * imported the previous Mattermost-shaped helper bundle. New plugins should
  * import the generic SDK subpaths directly.
  */
-export { resolveControlCommandGate } from "./command-auth.js";
-export { formatPairingApproveHint } from "./channel-plugin-common.js";
 export type { HistoryEntry } from "./reply-history.js";
 export {
   buildPendingHistoryContextFromMap,
@@ -16,7 +14,7 @@ export type { ReplyPayload } from "./reply-payload.js";
 export type { ChatType } from "../channels/chat-type.js";
 export { resolveControlCommandGate } from "../channels/command-gating.js";
 export { logInboundDrop, logTypingFailure } from "../channels/logging.js";
-export { resolveAllowlistMatchSimple } from "../channels/plugins/allowlist-match.js";
+export { resolveAllowlistMatchSimple } from "../channels/allowlist-match.js";
 export { normalizeProviderId } from "../agents/model-selection.js";
 export {
   buildModelsProviderData,

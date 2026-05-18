@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { StreamFn } from "@mariozechner/pi-agent-core";
 import {
   calculateCost,
@@ -173,6 +173,14 @@ function shortHash(value: string): string {
     hash = (hash * 31 + value.charCodeAt(i)) | 0;
   }
   return Math.abs(hash).toString(36);
+}
+
+const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
+
+function coercePromptCacheKey(sessionId: string | undefined): string | undefined {
+  if (!sessionId) return undefined;
+  if (sessionId.length <= PROMPT_CACHE_KEY_MAX_LENGTH) return sessionId;
+  return createHash("sha256").update(sessionId).digest("hex");
 }
 
 function encodeTextSignatureV1(id: string, phase?: "commentary" | "final_answer"): string {
@@ -890,7 +898,8 @@ export function buildOpenAIResponsesParams(
     model: model.id,
     input: messages,
     stream: true,
-    prompt_cache_key: cacheRetention === "none" ? undefined : options?.sessionId,
+    prompt_cache_key:
+      cacheRetention === "none" ? undefined : coercePromptCacheKey(options?.sessionId),
     prompt_cache_retention: getPromptCacheRetention(model.baseUrl, cacheRetention),
     ...(isCodexResponses ? { instructions: buildOpenAICodexResponsesInstructions(context) } : {}),
     ...(metadata ? { metadata } : {}),
@@ -1780,7 +1789,7 @@ export function buildOpenAICompletionsParams(
     params.store = false;
   }
   if (compat.supportsPromptCacheKey && cacheRetention !== "none" && options?.sessionId) {
-    params.prompt_cache_key = options.sessionId;
+    params.prompt_cache_key = coercePromptCacheKey(options.sessionId);
   }
   if (options?.maxTokens) {
     if (compat.maxTokensField === "max_tokens") {

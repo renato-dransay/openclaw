@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import type { Model } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
   applyOpenAIResponsesPayloadPolicy,
+  normalizePromptCacheKeyLength,
   resolveOpenAIResponsesPayloadPolicy,
 } from "./openai-responses-payload-policy.js";
 
@@ -175,5 +177,39 @@ describe("openai responses payload policy", () => {
       allowsServiceTier: true,
       shouldStripStore: false,
     });
+  });
+
+  it("hashes prompt_cache_key when longer than 64 chars during policy application", () => {
+    const longKey =
+      "agent:roxy:explicit:wf-d4c54502-c54c-4d82-a648-f88b181d7910-escalation_analyze-member-standups_story_11";
+    expect(longKey.length).toBeGreaterThan(64);
+    const payload: Record<string, unknown> = { prompt_cache_key: longKey };
+
+    applyOpenAIResponsesPayloadPolicy(
+      payload,
+      resolveOpenAIResponsesPayloadPolicy(
+        {
+          api: "openai-codex-responses",
+          provider: "openai-codex",
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+        },
+        { storeMode: "disable" },
+      ),
+    );
+
+    expect(payload.prompt_cache_key).toBe(createHash("sha256").update(longKey).digest("hex"));
+    expect((payload.prompt_cache_key as string).length).toBe(64);
+  });
+
+  it("normalizePromptCacheKeyLength leaves short keys untouched", () => {
+    const payload: Record<string, unknown> = { prompt_cache_key: "short-session-id" };
+    normalizePromptCacheKeyLength(payload);
+    expect(payload.prompt_cache_key).toBe("short-session-id");
+  });
+
+  it("normalizePromptCacheKeyLength is a no-op when payload has no cache key", () => {
+    const payload: Record<string, unknown> = { foo: "bar" };
+    normalizePromptCacheKeyLength(payload);
+    expect(payload).toEqual({ foo: "bar" });
   });
 });

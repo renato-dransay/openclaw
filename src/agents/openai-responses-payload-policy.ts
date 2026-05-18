@@ -1,7 +1,18 @@
+import { createHash } from "node:crypto";
 import { readStringValue } from "../shared/string-coerce.js";
 import { supportsOpenAIReasoningEffort } from "./openai-reasoning-effort.js";
 import { isOpenAIResponsesApi } from "./provider-attribution.js";
 import { resolveProviderRequestPolicyConfig } from "./provider-request-config.js";
+
+const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
+
+export function normalizePromptCacheKeyLength(payloadObj: Record<string, unknown>): void {
+  const value = payloadObj.prompt_cache_key;
+  if (typeof value !== "string" || value.length <= PROMPT_CACHE_KEY_MAX_LENGTH) {
+    return;
+  }
+  payloadObj.prompt_cache_key = createHash("sha256").update(value).digest("hex");
+}
 
 type OpenAIResponsesPayloadModel = {
   api?: unknown;
@@ -153,6 +164,7 @@ export function applyOpenAIResponsesPayloadPolicy(
   payloadObj: Record<string, unknown>,
   policy: OpenAIResponsesPayloadPolicy,
 ): void {
+  normalizePromptCacheKeyLength(payloadObj);
   if (policy.explicitStore !== undefined) {
     payloadObj.store = policy.explicitStore;
   }

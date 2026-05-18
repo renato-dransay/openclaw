@@ -4,9 +4,12 @@ import {
   rewriteUpdateFlagArgv,
   resolveMissingPluginCommandMessage,
   shouldEnsureCliPath,
-  shouldHoistRouteLogsToStderr,
+  shouldStartCrestodianForBareRoot,
+  shouldStartCrestodianForModernOnboard,
+  shouldUseBrowserHelpFastPath,
   shouldUseRootHelpFastPath,
 } from "./run-main-policy.js";
+import { shouldHoistRouteLogsToStderr } from "./run-main.js";
 
 const memoryWikiCommandAliasRegistry: PluginManifestCommandAliasRegistry = {
   plugins: [

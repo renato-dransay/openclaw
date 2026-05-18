@@ -12,6 +12,7 @@ import { flattenCompletionMessagesToStringContent } from "../openai-completions-
 import { resolveOpenAIReasoningEffortForModel } from "../openai-reasoning-effort.js";
 import {
   applyOpenAIResponsesPayloadPolicy,
+  normalizePromptCacheKeyLength,
   resolveOpenAIResponsesPayloadPolicy,
 } from "../openai-responses-payload-policy.js";
 import { resolveOpenAITextVerbosity, type OpenAITextVerbosity } from "../openai-text-verbosity.js";
@@ -236,22 +237,24 @@ export function createOpenAIResponsesContextManagementWrapper(
       enableServerCompaction: true,
       storeMode: "provider-policy",
     });
-    if (
-      policy.explicitStore === undefined &&
-      !policy.useServerCompaction &&
-      !policy.shouldStripStore &&
-      !policy.shouldStripPromptCache &&
-      !policy.shouldStripDisabledReasoningPayload
-    ) {
-      return underlying(model, context, options);
-    }
+    const hasPolicyAction =
+      policy.explicitStore !== undefined ||
+      policy.useServerCompaction ||
+      policy.shouldStripStore ||
+      policy.shouldStripPromptCache ||
+      policy.shouldStripDisabledReasoningPayload;
 
     const originalOnPayload = options?.onPayload;
     return underlying(model, context, {
       ...options,
       onPayload: (payload) => {
         if (payload && typeof payload === "object") {
-          applyOpenAIResponsesPayloadPolicy(payload as Record<string, unknown>, policy);
+          const payloadObj = payload as Record<string, unknown>;
+          if (hasPolicyAction) {
+            applyOpenAIResponsesPayloadPolicy(payloadObj, policy);
+          } else {
+            normalizePromptCacheKeyLength(payloadObj);
+          }
         }
         return originalOnPayload?.(payload, model);
       },

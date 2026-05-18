@@ -949,6 +949,37 @@ describe("openai transport stream", () => {
     expect(params.service_tier).toBe("auto");
   });
 
+  it("hashes long sessionId before forwarding as prompt_cache_key for responses params", () => {
+    const longSessionId =
+      "agent:roxy:explicit:wf-4b866436-af84-4de6-a850-5a2c8f9cccd4-escalation_review_story_3";
+    const params = buildOpenAIResponsesParams(
+      {
+        id: "gpt-5.4",
+        name: "GPT-5.4",
+        api: "openai-codex-responses",
+        provider: "openai-codex",
+        baseUrl: "https://chatgpt.com/backend-api",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      } satisfies Model<"openai-codex-responses">,
+      {
+        systemPrompt: "system",
+        messages: [{ role: "user", content: "Hello", timestamp: 1 }],
+        tools: [],
+      } as never,
+      { cacheRetention: "long", sessionId: longSessionId },
+      undefined,
+    ) as { prompt_cache_key?: string };
+
+    expect(params.prompt_cache_key).toBeDefined();
+    expect(params.prompt_cache_key?.length).toBeLessThanOrEqual(64);
+    expect(params.prompt_cache_key).not.toBe(longSessionId);
+    expect(params.prompt_cache_key).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   it("does not infer high reasoning when Pi passes thinking off", () => {
     const params = buildOpenAIResponsesParams(
       {
@@ -1922,6 +1953,37 @@ describe("openai transport stream", () => {
     ) as { prompt_cache_key?: string };
 
     expect(params.prompt_cache_key).toBe("session-123");
+  });
+
+  it("hashes long sessionId before forwarding as prompt_cache_key for completions providers", () => {
+    const longSessionId =
+      "agent:roxy:explicit:wf-4b866436-af84-4de6-a850-5a2c8f9cccd4-escalation_review_story_3";
+    const params = buildOpenAICompletionsParams(
+      {
+        id: "custom-model",
+        name: "Custom Model",
+        api: "openai-completions",
+        provider: "custom-cpa",
+        baseUrl: "https://proxy.example.com/v1",
+        compat: { supportsPromptCacheKey: true },
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32768,
+        maxTokens: 8192,
+      } as unknown as Model<"openai-completions">,
+      {
+        systemPrompt: "system",
+        messages: [],
+        tools: [],
+      } as never,
+      { sessionId: longSessionId },
+    ) as { prompt_cache_key?: string };
+
+    expect(params.prompt_cache_key).toBeDefined();
+    expect(params.prompt_cache_key?.length).toBeLessThanOrEqual(64);
+    expect(params.prompt_cache_key).not.toBe(longSessionId);
+    expect(params.prompt_cache_key).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("omits prompt_cache_key for completions when caching is disabled or not opted in", () => {

@@ -6,6 +6,7 @@ import {
   type ModelProviderConfig,
   type ProviderPlugin,
 } from "openclaw/plugin-sdk/provider-model-shared";
+import { OPENAI_RESPONSES_STREAM_HOOKS } from "openclaw/plugin-sdk/provider-stream-family";
 import { resolveCodexSystemPromptContribution } from "./prompt-overlay.js";
 import {
   buildCodexModelDefinition,
@@ -93,6 +94,7 @@ export function buildCodexProvider(options: BuildCodexProviderOptions = {}): Pro
     resolveSystemPromptContribution: ({ config, modelId }) =>
       resolveCodexSystemPromptContribution({ config, modelId }),
     isModernModelRef: ({ modelId }) => isModernCodexModel(modelId),
+    wrapStreamFn: OPENAI_RESPONSES_STREAM_HOOKS.wrapStreamFn,
   };
 }
 

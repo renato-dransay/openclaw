@@ -34,6 +34,9 @@ export type AgentRuntimeFailoverReason =
   | "model_not_found"
   | "session_expired"
   | "circuit_open"
+  | "empty_response"
+  | "no_error_details"
+  | "unclassified"
   | "unknown";
 
 export type AgentRuntimeConfig = unknown;

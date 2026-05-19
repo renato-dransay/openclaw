@@ -144,6 +144,43 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
 (globalThis as Record<symbol, unknown>)[Symbol.for("openclaw.gatewayHandlers")] =
   coreGatewayHandlers;
 
+function createRequestGatewayMethodRegistry(
+  extraHandlers?: GatewayRequestHandlers,
+): GatewayMethodRegistry {
+  const activePluginRegistry = getPluginRegistryState()?.activeRegistry;
+  const activePluginHandlers = activePluginRegistry?.gatewayHandlers ?? {};
+  const extraHandlerEntries = Object.entries(extraHandlers ?? {});
+  const pluginMethodNames = new Set(Object.keys(activePluginHandlers));
+  const coreDescriptorHandlers = { ...coreGatewayHandlers };
+  for (const [method, extraHandler] of extraHandlerEntries) {
+    if (!pluginMethodNames.has(method) && isCoreGatewayMethodClassified(method)) {
+      coreDescriptorHandlers[method] = extraHandler;
+    }
+  }
+  const coreDescriptors = createCoreGatewayMethodDescriptors(coreDescriptorHandlers);
+  for (const descriptor of coreDescriptors) {
+    const extraHandler = extraHandlers?.[descriptor.name];
+    if (extraHandler && !pluginMethodNames.has(descriptor.name)) {
+      descriptor.handler = extraHandler;
+    }
+  }
+  const coreMethodNames = new Set(coreDescriptors.map((descriptor) => descriptor.name));
+  const auxHandlers = Object.fromEntries(
+    extraHandlerEntries.filter(
+      ([method]) => !pluginMethodNames.has(method) && !coreMethodNames.has(method),
+    ),
+  );
+  return createGatewayMethodRegistry([
+    ...coreDescriptors,
+    ...(activePluginRegistry ? createPluginGatewayMethodDescriptors(activePluginRegistry) : []),
+    ...createGatewayMethodDescriptorsFromHandlers({
+      handlers: auxHandlers,
+      owner: { kind: "aux", area: "gateway-extra" },
+      defaultScope: ADMIN_SCOPE,
+    }),
+  ]);
+}
+
 export async function handleGatewayRequest(
   opts: GatewayRequestOptions & { extraHandlers?: GatewayRequestHandlers },
 ): Promise<void> {

@@ -98,22 +98,19 @@ export async function handleAssistantFailover(params: {
   };
 
   if (decision.action === "rotate_profile") {
-    if (params.lastProfileId) {
-      const reason = params.timedOut ? "timeout" : params.assistantProfileFailureReason;
-      await params.maybeMarkAuthProfileFailure({
-        profileId: params.lastProfileId,
-        reason,
-        modelId: params.modelId,
-        errorText: params.lastAssistant?.errorMessage ?? undefined,
-      });
-      if (params.timedOut && !params.isProbeSession) {
-        params.warn(`Profile ${params.lastProfileId} timed out. Trying next account...`);
+    const failedProfileId = params.lastProfileId;
+    const timeoutFailure = params.timedOut || params.idleTimedOut;
+    const failureReason = timeoutFailure ? "timeout" : params.assistantProfileFailureReason;
+    const markFailedProfile = async () => {
+      if (!failedProfileId || !failureReason || failureReason === "timeout") {
+        return;
       }
       try {
         await params.maybeMarkAuthProfileFailure({
           profileId: failedProfileId,
           reason: failureReason,
           modelId: params.modelId,
+          errorText: params.lastAssistant?.errorMessage ?? undefined,
         });
       } catch (err) {
         params.warn(`profile failure mark failed: ${String(err)}`);

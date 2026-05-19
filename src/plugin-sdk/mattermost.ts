@@ -15,7 +15,6 @@ export {
 export { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";
 export type { ReplyPayload } from "./reply-payload.js";
 export type { ChatType } from "../channels/chat-type.js";
-export { resolveControlCommandGate } from "../channels/command-gating.js";
 export { logInboundDrop, logTypingFailure } from "../channels/logging.js";
 export { resolveAllowlistMatchSimple } from "../channels/plugins/allowlist-match.js";
 export { normalizeProviderId } from "../agents/model-selection.js";
@@ -29,7 +28,6 @@ export {
   setAccountEnabledInConfigSection,
 } from "../channels/plugins/config-helpers.js";
 export { buildChannelConfigSchema } from "../channels/plugins/config-schema.js";
-export { formatPairingApproveHint } from "../channels/plugins/helpers.js";
 export { chunkTextForOutbound } from "./text-chunking.js";
 export { resolveChannelMediaMaxBytes } from "../channels/plugins/media-limits.js";
 export {

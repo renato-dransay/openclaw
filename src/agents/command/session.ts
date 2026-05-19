@@ -224,6 +224,7 @@ export function resolveSessionKeyForRequest(opts: {
     return { sessionKey, sessionStore, storePath };
   }
 
+  const defaultAgentId = normalizeAgentId(resolveDefaultAgentId(opts.cfg));
   const requestedAgentId = opts.agentId?.trim() ? normalizeAgentId(opts.agentId) : undefined;
   const requestedSessionId = opts.sessionId?.trim() || undefined;
   const explicitSessionKey =

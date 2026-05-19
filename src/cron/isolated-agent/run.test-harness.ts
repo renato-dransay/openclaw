@@ -41,6 +41,7 @@ function normalizeModelSelectionForTest(value: unknown): string | undefined {
 export const buildWorkspaceSkillSnapshotMock = createMock();
 export const resolveAgentConfigMock = createMock();
 export const resolveEffectiveModelFallbacksMock = createMock();
+export const resolveSubagentModelFallbacksOverrideMock = createMock();
 export const resolveAgentModelFallbacksOverrideMock = createMock();
 export const resolveAgentSkillsFilterMock = createMock();
 export const getModelRefStatusMock = createMock();
@@ -64,12 +65,14 @@ export const resolveCronPayloadOutcomeMock = createMock();
 export const resolveCronDeliveryPlanMock = createMock();
 export const resolveDeliveryTargetMock = createMock();
 export const dispatchCronDeliveryMock = createMock();
+export const preflightCronModelProviderMock = createMock();
 export const isHeartbeatOnlyResponseMock = createMock();
 export const resolveHeartbeatAckMaxCharsMock = createMock();
 export const resolveSessionAuthProfileOverrideMock = createMock();
 export const resolveFastModeStateMock = createMock();
 export const getChannelPluginMock = createMock();
 export const retireSessionMcpRuntimeMock = createMock();
+export const ensureRuntimePluginsLoadedMock = createMock();
 
 const resolveBootstrapWarningSignaturesSeenMock = createMock();
 const resolveCronStyleNowMock = createMock();
@@ -80,8 +83,8 @@ const hasNonzeroUsageMock = createMock();
 const ensureAgentWorkspaceMock = createMock();
 const normalizeThinkLevelMock = createMock();
 const normalizeVerboseLevelMock = createMock();
-const isThinkingLevelSupportedMock = createMock();
-const resolveSupportedThinkingLevelMock = createMock();
+export const isThinkingLevelSupportedMock = createMock();
+export const resolveSupportedThinkingLevelMock = createMock();
 const supportsXHighThinkingMock = createMock();
 const resolveSessionTranscriptPathMock = createMock();
 const setSessionRuntimeModelMock = createMock();
@@ -92,7 +95,7 @@ const mapHookExternalContentSourceMock = createMock();
 const isExternalHookSessionMock = createMock();
 const resolveHookExternalContentSourceMock = createMock();
 const getSkillsSnapshotVersionMock = createMock();
-const loadModelCatalogMock = createMock();
+export const loadModelCatalogMock = createMock();
 const getRemoteSkillEligibilityMock = createMock();
 
 vi.mock("./run.runtime.js", () => ({
@@ -140,6 +143,10 @@ vi.mock("./run-model-catalog.runtime.js", () => ({
   loadModelCatalog: loadModelCatalogMock,
 }));
 
+vi.mock("./run-runtime-plugins.runtime.js", () => ({
+  ensureRuntimePluginsLoaded: ensureRuntimePluginsLoadedMock,
+}));
+
 vi.mock("./skills-snapshot.runtime.js", () => ({
   buildWorkspaceSkillSnapshot: buildWorkspaceSkillSnapshotMock,
   canExecRequestNode: vi.fn(() => false),
@@ -157,10 +164,29 @@ vi.mock("./run-model-selection.runtime.js", () => ({
   resolveAllowedModelRef: resolveAllowedModelRefMock,
   resolveConfiguredModelRef: resolveConfiguredModelRefMock,
   resolveHooksGmailModel: resolveHooksGmailModelMock,
+  resolveSubagentModelConfigSelectionResult: ({
+    cfg,
+    agentConfigOverride,
+  }: {
+    cfg?: { agents?: { defaults?: { subagents?: { model?: unknown } } } };
+    agentConfigOverride?: { model?: unknown; subagents?: { model?: unknown } };
+  }) => {
+    for (const candidate of [
+      { raw: agentConfigOverride?.subagents?.model, source: "subagent" as const },
+      { raw: agentConfigOverride?.model, source: "agent" as const },
+      { raw: cfg?.agents?.defaults?.subagents?.model, source: "default-subagent" as const },
+    ]) {
+      if (normalizeModelSelectionForTest(candidate.raw)) {
+        return candidate;
+      }
+    }
+    return undefined;
+  },
 }));
 
 vi.mock("./run-execution.runtime.js", () => ({
   resolveEffectiveModelFallbacks: resolveEffectiveModelFallbacksMock,
+  resolveSubagentModelFallbacksOverride: resolveSubagentModelFallbacksOverrideMock,
   resolveBootstrapWarningSignaturesSeen: resolveBootstrapWarningSignaturesSeenMock,
   getCliSessionId: getCliSessionIdMock,
   runCliAgent: runCliAgentMock,
@@ -219,6 +245,10 @@ vi.mock("./run-delivery.runtime.js", async () => {
     dispatchCronDelivery: dispatchCronDeliveryMock,
   };
 });
+
+vi.mock("./model-preflight.runtime.js", () => ({
+  preflightCronModelProvider: preflightCronModelProviderMock,
+}));
 
 vi.mock("./helpers.js", () => ({
   isHeartbeatOnlyResponse: isHeartbeatOnlyResponseMock,
@@ -293,17 +323,56 @@ function resetRunConfigMocks(): void {
   resolveAgentConfigMock.mockReturnValue(undefined);
   resolveEffectiveModelFallbacksMock.mockReset();
   resolveEffectiveModelFallbacksMock.mockImplementation(
-    ({ cfg, agentId, hasSessionModelOverride }) => {
+    ({ cfg, agentId, hasSessionModelOverride, modelOverrideSource }) => {
       const agentFallbacksOverride = resolveAgentModelFallbacksOverrideMock(cfg, agentId) as
         | string[]
         | undefined;
       if (!hasSessionModelOverride) {
         return agentFallbacksOverride;
       }
+      if (modelOverrideSource !== "auto") {
+        return [];
+      }
       const defaultFallbacks = resolveAgentModelFallbackValues(cfg?.agents?.defaults?.model);
       return agentFallbacksOverride ?? defaultFallbacks;
     },
   );
+  resolveSubagentModelFallbacksOverrideMock.mockReset();
+  resolveSubagentModelFallbacksOverrideMock.mockImplementation((cfg, agentId) => {
+    const agentConfig = resolveAgentConfigMock(cfg, agentId) as
+      | { model?: unknown; subagents?: { model?: unknown } }
+      | undefined;
+    const resolveOverride = (raw: unknown): string[] | undefined => {
+      const primary = normalizeModelSelectionForTest(raw);
+      if (!raw) {
+        return undefined;
+      }
+      if (typeof raw === "string") {
+        return primary ? [] : undefined;
+      }
+      if (typeof raw !== "object" || Array.isArray(raw)) {
+        return undefined;
+      }
+      if (!Object.hasOwn(raw, "fallbacks")) {
+        return Object.hasOwn(raw, "primary") && primary ? [] : undefined;
+      }
+      const fallbacks = (raw as { fallbacks?: unknown }).fallbacks;
+      return Array.isArray(fallbacks)
+        ? fallbacks.filter((entry) => typeof entry === "string")
+        : undefined;
+    };
+    const subagentFallbacks = resolveOverride(agentConfig?.subagents?.model);
+    if (subagentFallbacks !== undefined) {
+      return subagentFallbacks;
+    }
+    const selectedConfig = [
+      agentConfig?.subagents?.model,
+      agentConfig?.model,
+      (cfg as { agents?: { defaults?: { subagents?: { model?: unknown } } } })?.agents?.defaults
+        ?.subagents?.model,
+    ].find((raw) => normalizeModelSelectionForTest(raw));
+    return resolveOverride(selectedConfig);
+  });
   resolveAgentModelFallbacksOverrideMock.mockReturnValue(undefined);
   resolveAgentSkillsFilterMock.mockReturnValue(undefined);
   resolveConfiguredModelRefMock.mockReturnValue({ provider: "openai", model: "gpt-5.4" });
@@ -450,22 +519,22 @@ function resetRunOutcomeMocks(): void {
       synthesizedText,
       deliveryRequested,
       skipHeartbeatDelivery,
-      skipMessagingToolDelivery,
+      sourceDeliveryOutcome,
       resolvedDelivery,
     }) => ({
       result: undefined,
       delivered: Boolean(
-        skipMessagingToolDelivery ||
+        sourceDeliveryOutcome?.verifiedMessageToolDelivery ||
         (deliveryRequested &&
           !skipHeartbeatDelivery &&
-          !skipMessagingToolDelivery &&
+          !sourceDeliveryOutcome?.satisfiesSourceDelivery &&
           resolvedDelivery.ok),
       ),
       deliveryAttempted: Boolean(
-        skipMessagingToolDelivery ||
+        sourceDeliveryOutcome?.verifiedMessageToolDelivery ||
         (deliveryRequested &&
           !skipHeartbeatDelivery &&
-          !skipMessagingToolDelivery &&
+          !sourceDeliveryOutcome?.satisfiesSourceDelivery &&
           resolvedDelivery.ok),
       ),
       summary,
@@ -474,6 +543,8 @@ function resetRunOutcomeMocks(): void {
       deliveryPayloads,
     }),
   );
+  preflightCronModelProviderMock.mockReset();
+  preflightCronModelProviderMock.mockResolvedValue({ status: "available" });
   isHeartbeatOnlyResponseMock.mockReset();
   isHeartbeatOnlyResponseMock.mockReturnValue(false);
   resolveHeartbeatAckMaxCharsMock.mockReset();
@@ -499,6 +570,7 @@ export function resetRunCronIsolatedAgentTurnHarness(): void {
   resetRunSessionMocks();
   setSessionRuntimeModelMock.mockReturnValue(undefined);
   logWarnMock.mockReset();
+  ensureRuntimePluginsLoadedMock.mockReset();
 }
 
 export function clearFastTestEnv(): string | undefined {

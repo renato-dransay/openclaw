@@ -1,8 +1,15 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const css = readFileSync(path.join(process.cwd(), "ui/src/styles/config-quick.css"), "utf8");
+const cssPath = [
+  resolve(process.cwd(), "ui/src/styles/config-quick.css"),
+  resolve(process.cwd(), "..", "ui/src/styles/config-quick.css"),
+].find((candidate) => existsSync(candidate));
+if (!cssPath) {
+  throw new Error(`config-quick.css not found from cwd: ${process.cwd()}`);
+}
+const css = readFileSync(cssPath, "utf8");
 
 describe("config-quick styles", () => {
   it("includes the local user identity quick-settings styles", () => {
@@ -39,6 +46,20 @@ describe("config-quick styles", () => {
     expect(css).toContain(".qs-profiles");
     expect(css).toContain(".qs-profile-state--pending");
     expect(css).toContain(".qs-profile-panel__actions-row");
+  });
+
+  it("keeps settings section tabs padded away from scoped page content", () => {
+    expect(css).toContain("padding: 24px 16px 16px;");
+    expect(css).toContain("padding: 16px 0 12px;");
+  });
+
+  it("keeps settings section icons on the current text color", () => {
+    expect(css).toMatch(
+      /\.settings-section-nav__icon svg \{[\s\S]*stroke: currentColor;[\s\S]*fill: none;/,
+    );
+    expect(css).toMatch(
+      /\.settings-section-nav__icon svg \* \{[\s\S]*stroke: currentColor;[\s\S]*fill: none;/,
+    );
   });
 
   it("avoids transition-all in the quick settings surface", () => {

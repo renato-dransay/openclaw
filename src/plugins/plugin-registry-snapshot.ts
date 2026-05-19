@@ -1,11 +1,15 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { resolveCompatibilityHostVersion } from "../version.js";
+import { resolveUserPath } from "../utils.js";
 import { resolveBundledPluginsDir } from "./bundled-dir.js";
+import { getCurrentPluginMetadataSnapshot } from "./current-plugin-metadata-snapshot.js";
+import { fileSignatureMatches } from "./installed-plugin-index-hash.js";
+import { hasOptionalMissingPluginManifestFile } from "./installed-plugin-index-manifest.js";
+import { loadInstalledPluginIndexInstallRecordsSync } from "./installed-plugin-index-record-reader.js";
 import {
   inspectPersistedInstalledPluginIndex,
   readPersistedInstalledPluginIndexSync,
-  resolveInstalledPluginIndexStorePath,
   refreshPersistedInstalledPluginIndex,
   type InstalledPluginIndexStoreInspection,
   type InstalledPluginIndexStoreOptions,
@@ -22,7 +26,6 @@ import {
   type LoadInstalledPluginIndexParams,
   type RefreshInstalledPluginIndexParams,
 } from "./installed-plugin-index.js";
-import { resolvePluginCacheInputs } from "./roots.js";
 
 export type PluginRegistrySnapshot = InstalledPluginIndex;
 export type PluginRegistryRecord = InstalledPluginIndexRecord;
@@ -46,16 +49,6 @@ export type PluginRegistrySnapshotResult = {
   diagnostics: readonly PluginRegistrySnapshotDiagnostic[];
 };
 
-const DERIVED_SNAPSHOT_CACHE_MS = 1000;
-const derivedSnapshotCache = new Map<
-  string,
-  { expiresAt: number; result: PluginRegistrySnapshotResult }
->();
-
-export function clearPluginRegistrySnapshotCache(): void {
-  derivedSnapshotCache.clear();
-}
-
 export const DISABLE_PERSISTED_PLUGIN_REGISTRY_ENV = "OPENCLAW_DISABLE_PERSISTED_PLUGIN_REGISTRY";
 
 function formatDeprecatedPersistedRegistryDisableWarning(): string {
@@ -77,6 +70,42 @@ function hasEnvFlag(env: NodeJS.ProcessEnv, name: string): boolean {
   return Boolean(value && value !== "0" && value !== "false" && value !== "no");
 }
 
+function canReuseCurrentPluginMetadataSnapshot(params: LoadPluginRegistryParams): boolean {
+  return (
+    params.preferPersisted !== false &&
+    params.stateDir === undefined &&
+    params.filePath === undefined &&
+    params.pluginIndexFilePath === undefined &&
+    params.installRecords === undefined &&
+    params.candidates === undefined &&
+    params.diagnostics === undefined &&
+    params.now === undefined
+  );
+}
+
+function loadCurrentPluginRegistrySnapshotResult(
+  params: LoadPluginRegistryParams,
+): PluginRegistrySnapshotResult | undefined {
+  if (!canReuseCurrentPluginMetadataSnapshot(params)) {
+    return undefined;
+  }
+  const env = params.env ?? process.env;
+  const current = getCurrentPluginMetadataSnapshot({
+    config: params.config,
+    env,
+    ...(params.workspaceDir ? { workspaceDir: params.workspaceDir } : {}),
+    ...(params.workspaceDir === undefined ? { allowWorkspaceScopedSnapshot: true } : {}),
+  });
+  if (!current || current.registryDiagnostics.length > 0) {
+    return undefined;
+  }
+  return {
+    snapshot: current.index,
+    source: "provided",
+    diagnostics: current.registryDiagnostics,
+  };
+}
+
 function hasMissingPersistedPluginSource(index: InstalledPluginIndex): boolean {
   return index.plugins.some((plugin) => {
     if (!plugin.enabled) {
@@ -84,7 +113,7 @@ function hasMissingPersistedPluginSource(index: InstalledPluginIndex): boolean {
     }
     return (
       !fs.existsSync(plugin.rootDir) ||
-      !fs.existsSync(plugin.manifestPath) ||
+      (!hasOptionalMissingPluginManifestFile(plugin) && !fs.existsSync(plugin.manifestPath)) ||
       (plugin.source ? !fs.existsSync(plugin.source) : false) ||
       (plugin.setupSource ? !fs.existsSync(plugin.setupSource) : false)
     );
@@ -99,12 +128,21 @@ function resolveComparablePath(filePath: string): string {
   }
 }
 
+function isRelativePathInsideOrEqual(relativePath: string): boolean {
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relativePath))
+  );
+}
+
 function isPathInsideOrEqual(childPath: string, parentPath: string): boolean {
   const relative = path.relative(
     resolveComparablePath(parentPath),
     resolveComparablePath(childPath),
   );
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  return isRelativePathInsideOrEqual(relative);
 }
 
 function hasMismatchedPersistedBundledPluginRoot(
@@ -121,35 +159,113 @@ function hasMismatchedPersistedBundledPluginRoot(
   );
 }
 
-function resolveDerivedSnapshotCacheKey(
-  params: LoadPluginRegistryParams,
-  env: NodeJS.ProcessEnv,
-): string | null {
-  if (
-    params.cache === false ||
-    params.preferPersisted === false ||
-    params.config ||
-    params.workspaceDir ||
-    params.stateDir ||
-    params.filePath ||
-    params.pluginIndexFilePath ||
-    params.installRecords ||
-    params.candidates ||
-    params.diagnostics ||
-    params.now
-  ) {
+function hashExistingFile(filePath: string): string | null {
+  try {
+    return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  } catch {
     return null;
   }
+}
 
-  const { roots, loadPaths } = resolvePluginCacheInputs({ env });
-  return JSON.stringify({
-    persistedStore: resolveInstalledPluginIndexStorePath({ env }),
-    roots,
-    loadPaths,
-    hostContractVersion: resolveCompatibilityHostVersion(env),
-    disablePersisted: env[DISABLE_PERSISTED_PLUGIN_REGISTRY_ENV] ?? "",
-    disableBundled: env.OPENCLAW_DISABLE_BUNDLED_PLUGINS ?? "",
-    vitest: env.VITEST ?? "",
+function resolveRecordPackageJsonPath(plugin: InstalledPluginIndexRecord): string | null {
+  const packageJsonPath = plugin.packageJson?.path;
+  if (!packageJsonPath) {
+    return null;
+  }
+  const rootDir = plugin.rootDir || path.dirname(plugin.manifestPath);
+  const resolved = path.resolve(rootDir, packageJsonPath);
+  const relative = path.relative(rootDir, resolved);
+  if (!isRelativePathInsideOrEqual(relative)) {
+    return null;
+  }
+  const realRelative = path.relative(
+    resolveComparablePath(rootDir),
+    resolveComparablePath(resolved),
+  );
+  return isRelativePathInsideOrEqual(realRelative) ? resolved : null;
+}
+
+function hasStalePersistedPluginDiagnostics(index: InstalledPluginIndex): boolean {
+  return index.diagnostics.some((diag) => {
+    const source = diag.source;
+    return (
+      typeof diag.pluginId === "string" &&
+      diag.pluginId.trim().length > 0 &&
+      typeof source === "string" &&
+      path.isAbsolute(source) &&
+      !fs.existsSync(source)
+    );
+  });
+}
+
+function hasStalePersistedPluginMetadata(index: InstalledPluginIndex): boolean {
+  return index.plugins.some((plugin) => {
+    if (!hasOptionalMissingPluginManifestFile(plugin)) {
+      const manifestSignatureMatches = fileSignatureMatches(
+        plugin.manifestPath,
+        plugin.manifestFile,
+      );
+      if (manifestSignatureMatches !== true) {
+        const manifestHash = hashExistingFile(plugin.manifestPath);
+        if (manifestHash && manifestHash !== plugin.manifestHash) {
+          return true;
+        }
+      }
+    }
+    const packageJsonPath = resolveRecordPackageJsonPath(plugin);
+    if (!plugin.packageJson?.hash) {
+      return false;
+    }
+    if (!packageJsonPath) {
+      return true;
+    }
+    const packageJsonSignatureMatches = fileSignatureMatches(
+      packageJsonPath,
+      plugin.packageJson.fileSignature,
+    );
+    if (packageJsonSignatureMatches === true && plugin.origin === "bundled") {
+      return false;
+    }
+    if (packageJsonSignatureMatches === false) {
+      return hashExistingFile(packageJsonPath) !== plugin.packageJson.hash;
+    }
+    // Fast same-size rewrites can preserve observable stat fields on some filesystems.
+    const packageJsonHash = hashExistingFile(packageJsonPath);
+    return packageJsonHash !== plugin.packageJson.hash;
+  });
+}
+
+function loadSnapshotInstallRecords(params: LoadPluginRegistryParams, env: NodeJS.ProcessEnv) {
+  return loadInstalledPluginIndexInstallRecordsSync({
+    env,
+    ...(params.stateDir ? { stateDir: params.stateDir } : {}),
+    ...(params.filePath
+      ? { filePath: params.filePath }
+      : params.pluginIndexFilePath
+        ? { filePath: params.pluginIndexFilePath }
+        : {}),
+  });
+}
+
+function hasRecoveredInstallRecordsMissingFromPersistedIndex(
+  index: InstalledPluginIndex,
+  installRecords: ReturnType<typeof loadInstalledPluginIndexInstallRecordsSync>,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  const persistedRecords = extractPluginInstallRecordsFromInstalledPluginIndex(index);
+  const persistedPluginIds = new Set(index.plugins.map((plugin) => plugin.pluginId));
+  return Object.entries(installRecords).some(([pluginId, record]) => {
+    if (persistedRecords[pluginId] && persistedPluginIds.has(pluginId)) {
+      return false;
+    }
+    const installPaths = [record.installPath, record.sourcePath].filter(
+      (candidate): candidate is string =>
+        typeof candidate === "string" && candidate.trim().length > 0,
+    );
+    if (installPaths.length === 0) {
+      return true;
+    }
+    return installPaths.some((installPath) => fs.existsSync(resolveUserPath(installPath, env)));
   });
 }
 
@@ -163,6 +279,10 @@ export function loadPluginRegistrySnapshotWithMetadata(
       diagnostics: [],
     };
   }
+  const current = loadCurrentPluginRegistrySnapshotResult(params);
+  if (current) {
+    return current;
+  }
 
   const env = params.env ?? process.env;
   const diagnostics: PluginRegistrySnapshotDiagnostic[] = [];
@@ -170,15 +290,6 @@ export function loadPluginRegistrySnapshotWithMetadata(
   const disabledByEnv = hasEnvFlag(env, DISABLE_PERSISTED_PLUGIN_REGISTRY_ENV);
   const persistedReadsEnabled = !disabledByCaller && !disabledByEnv;
   const persistedInstallRecordReadsEnabled = !disabledByEnv;
-  const derivedCacheKey = persistedReadsEnabled
-    ? resolveDerivedSnapshotCacheKey(params, env)
-    : null;
-  if (derivedCacheKey) {
-    const cached = derivedSnapshotCache.get(derivedCacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.result;
-    }
-  }
   let persistedIndex: InstalledPluginIndex | null = null;
   if (persistedInstallRecordReadsEnabled) {
     persistedIndex = readPersistedInstalledPluginIndexSync(params);
@@ -207,6 +318,33 @@ export function loadPluginRegistrySnapshotWithMetadata(
           message:
             "Persisted plugin registry points at a different bundled plugin tree; using derived plugin index. Run `openclaw plugins registry --refresh` to update the persisted registry.",
         });
+      } else if (hasStalePersistedPluginDiagnostics(persistedIndex)) {
+        diagnostics.push({
+          level: "warn",
+          code: "persisted-registry-stale-source",
+          message:
+            "Persisted plugin registry contains diagnostics referencing missing paths; using derived plugin index. Run `openclaw plugins registry --refresh` to update the persisted registry.",
+        });
+      } else if (hasStalePersistedPluginMetadata(persistedIndex)) {
+        diagnostics.push({
+          level: "warn",
+          code: "persisted-registry-stale-source",
+          message:
+            "Persisted plugin registry metadata no longer matches plugin manifest or package files; using derived plugin index. Run `openclaw plugins registry --refresh` to update the persisted registry.",
+        });
+      } else if (
+        hasRecoveredInstallRecordsMissingFromPersistedIndex(
+          persistedIndex,
+          loadSnapshotInstallRecords(params, env),
+          env,
+        )
+      ) {
+        diagnostics.push({
+          level: "warn",
+          code: "persisted-registry-stale-source",
+          message:
+            "Persisted plugin registry is missing recoverable managed npm plugins; using derived plugin index. Run `openclaw plugins registry --refresh` to update the persisted registry.",
+        });
       } else {
         return {
           snapshot: persistedIndex,
@@ -231,23 +369,16 @@ export function loadPluginRegistrySnapshotWithMetadata(
     });
   }
 
-  const result: PluginRegistrySnapshotResult = {
+  return {
     snapshot: loadInstalledPluginIndex({
       ...params,
-      installRecords:
-        params.installRecords ??
-        extractPluginInstallRecordsFromInstalledPluginIndex(persistedIndex),
+      ...(persistedInstallRecordReadsEnabled
+        ? {}
+        : { installRecords: params.installRecords ?? {} }),
     }),
     source: "derived",
     diagnostics,
   };
-  if (derivedCacheKey) {
-    derivedSnapshotCache.set(derivedCacheKey, {
-      expiresAt: Date.now() + DERIVED_SNAPSHOT_CACHE_MS,
-      result,
-    });
-  }
-  return result;
 }
 
 function resolveSnapshot(params: LoadPluginRegistryParams = {}): PluginRegistrySnapshot {

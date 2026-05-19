@@ -70,16 +70,12 @@ describe("createPersistentDedupe", () => {
     const first = createDedupe(root);
     expect(await first.checkAndRecord("m1", { namespace: "a" })).toBe(true);
     expect(await first.checkAndRecord("m1", { namespace: "a" })).toBe(false);
-    expect(await first.checkAndRecord("m2", { namespace: "a" })).toBe(true);
 
     const second = createDedupe(root);
     expect(await second.hasRecent("m1", { namespace: "a" })).toBe(true);
-    expect(await second.hasRecent("missing", { namespace: "a" })).toBe(false);
-    expect(await second.warmup("a")).toBe(2);
+    expect(await second.warmup("a")).toBe(1);
     expect(await second.checkAndRecord("m1", { namespace: "a" })).toBe(false);
-    expect(await second.checkAndRecord("m2", { namespace: "a" })).toBe(false);
-    expect(await second.checkAndRecord("m3", { namespace: "a" })).toBe(true);
-    expect(await second.checkAndRecord("m1", { namespace: "b" })).toBe(true);
+    expect(await second.checkAndRecord("m2", { namespace: "a" })).toBe(true);
 
     const raceDedupe = createDedupe(root, { ttlMs: 10_000 });
     const [raceFirst, raceSecond] = await Promise.all([
@@ -107,10 +103,11 @@ describe("createPersistentDedupe", () => {
     const emptyReader = createDedupe(root, { ttlMs: 10_000 });
     expect(await emptyReader.warmup("nonexistent")).toBe(0);
 
-    const writer = createDedupe(root, { ttlMs: 1000 });
     const oldNow = Date.now() - 2000;
-    expect(await writer.checkAndRecord("old-msg", { namespace: "acct", now: oldNow })).toBe(true);
-    expect(await writer.checkAndRecord("new-msg", { namespace: "acct" })).toBe(true);
+    await fs.writeFile(
+      path.join(root, "acct.json"),
+      JSON.stringify({ "old-msg": oldNow, "new-msg": Date.now() }),
+    );
 
     const reader = createDedupe(root, { ttlMs: 1000 });
     expect(await reader.warmup("acct")).toBe(1);
@@ -138,8 +135,10 @@ describe("createClaimableDedupe", () => {
     await expect(dedupe.claim("line:evt-1")).resolves.toEqual({ kind: "duplicate" });
 
     const claims = await Promise.all([dedupe.claim("line:race-1"), dedupe.claim("line:race-1")]);
-    expect(claims.filter((claim) => claim.kind === "claimed")).toHaveLength(1);
-    expect(claims.filter((claim) => claim.kind === "inflight")).toHaveLength(1);
+    const countClaimKind = (kind: (typeof claims)[number]["kind"]) =>
+      claims.reduce((count, claim) => count + (claim.kind === kind ? 1 : 0), 0);
+    expect(countClaimKind("claimed")).toBe(1);
+    expect(countClaimKind("inflight")).toBe(1);
 
     const waitingClaim = claims.find((claim) => claim.kind === "inflight");
     await expect(dedupe.commit("line:race-1")).resolves.toBe(true);

@@ -2,7 +2,12 @@ import JSON5 from "json5";
 import { html, nothing, type TemplateResult } from "lit";
 import { t } from "../../i18n/index.ts";
 import { icons } from "../icons.ts";
-import { BORDER_RADIUS_STOPS, type BorderRadiusStop } from "../storage.ts";
+import {
+  BORDER_RADIUS_STOPS,
+  TEXT_SCALE_STOPS,
+  type BorderRadiusStop,
+  type TextScaleStop,
+} from "../storage.ts";
 import type { ThemeTransitionContext } from "../theme-transition.ts";
 import type { ThemeMode, ThemeName } from "../theme.ts";
 import type { ConfigUiHints } from "../types.ts";
@@ -24,6 +29,14 @@ const BORDER_RADIUS_LABELS: Record<BorderRadiusStop, string> = {
   50: "Default",
   75: "Round",
   100: "Full",
+};
+
+const TEXT_SCALE_LABELS: Record<TextScaleStop, string> = {
+  90: "Small",
+  100: "Default",
+  110: "Large",
+  125: "XL",
+  140: "XXL",
 };
 
 export type WebPushUiState = {
@@ -85,10 +98,13 @@ export type ConfigProps = {
   onOpenCustomThemeImport?: () => void;
   borderRadius: number;
   setBorderRadius: (value: number) => void;
+  textScale: number;
+  setTextScale: (value: number) => void;
   gatewayUrl: string;
   assistantName: string;
   configPath?: string | null;
   navRootLabel?: string;
+  showRootTab?: boolean;
   includeSections?: string[];
   excludeSections?: string[];
   includeVirtualSections?: boolean;
@@ -478,40 +494,23 @@ function scopeSchemaSections(
   const include = params.include;
   const exclude = params.exclude;
   const nextProps: Record<string, JsonSchema> = {};
-  for (const [key, value] of Object.entries(schema.properties)) {
+  for (const key of Object.keys(schema.properties)) {
     if (include && include.size > 0 && !include.has(key)) {
       continue;
     }
     if (exclude && exclude.size > 0 && exclude.has(key)) {
       continue;
     }
-    nextProps[key] = value;
+    nextProps[key] = schema.properties[key];
   }
   return { ...schema, properties: nextProps };
 }
 
-function scopeUnsupportedPaths(
-  unsupportedPaths: string[],
-  params: { include?: ReadonlySet<string> | null; exclude?: ReadonlySet<string> | null },
-): string[] {
-  const include = params.include;
-  const exclude = params.exclude;
-  if ((!include || include.size === 0) && (!exclude || exclude.size === 0)) {
-    return unsupportedPaths;
+function asConfigSchema(value: unknown): JsonSchema | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
   }
-  return unsupportedPaths.filter((entry) => {
-    if (entry === "<root>") {
-      return true;
-    }
-    const [top] = entry.split(".");
-    if (include && include.size > 0) {
-      return include.has(top);
-    }
-    if (exclude && exclude.size > 0) {
-      return !exclude.has(top);
-    }
-    return true;
-  });
+  return value as JsonSchema;
 }
 
 function resolveSectionMeta(
@@ -788,6 +787,10 @@ const BUILTIN_THEME_OPTIONS: ThemeOption[] = [
   { id: "dash", label: "Dash", description: "Chocolate blueprint", icon: icons.barChart },
 ];
 
+function importedThemeName(props: Pick<ConfigProps, "hasCustomTheme" | "customThemeLabel">) {
+  return props.hasCustomTheme && props.customThemeLabel ? props.customThemeLabel : "Imported theme";
+}
+
 function focusCustomThemeImportInput() {
   const schedule =
     typeof requestAnimationFrame === "function"
@@ -917,14 +920,15 @@ function renderAppearanceSection(props: ConfigProps) {
     cvs.lastCustomThemeImportFocusToken = props.customThemeImportFocusToken;
     focusCustomThemeImportInput();
   }
+  const importedName = importedThemeName(props);
   const themeOptions: ThemeOption[] = [
     ...BUILTIN_THEME_OPTIONS,
     {
       id: "custom",
-      label: "Custom",
+      label: props.hasCustomTheme ? importedName : "Import",
       description: props.hasCustomTheme
-        ? `Imported from tweakcn${props.customThemeLabel ? `: ${props.customThemeLabel}` : ""}`
-        : "Open the tweakcn importer for this browser-local slot",
+        ? `Imported from tweakcn: ${importedName}`
+        : "Import a tweakcn theme into this browser-local slot",
       icon: icons.spark,
     },
   ];
@@ -971,17 +975,27 @@ function renderAppearanceSection(props: ConfigProps) {
                 <div class="settings-theme-import__copy">
                   <div class="settings-theme-import__title">Import from tweakcn</div>
                   <p class="settings-theme-import__hint">
-                    Paste a tweakcn share link. The import stays in this browser only and replaces
-                    the current custom slot.
+                    Open tweakcn.com, choose or create a theme, click Share, then paste the copied
+                    theme link here. Share links, editor URLs, registry URLs, theme IDs, and default
+                    theme names like amethyst-haze are accepted.
                   </p>
                 </div>
+                <a
+                  class="settings-theme-import__external"
+                  href="https://tweakcn.com/editor/theme"
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  Browse tweakcn themes ${icons.externalLink}
+                </a>
                 <label class="settings-theme-import__field">
-                  <span class="settings-theme-import__label">tweakcn link</span>
+                  <span class="settings-theme-import__label">Theme link or ID</span>
                   <input
                     class="settings-theme-import__input"
                     data-custom-theme-import-input
-                    type="url"
-                    placeholder="https://tweakcn.com/themes/..."
+                    type="text"
+                    spellcheck="false"
+                    placeholder="https://tweakcn.com/editor/theme?theme=... or amethyst-haze"
                     .value=${props.customThemeImportUrl}
                     @input=${(e: Event) =>
                       props.onCustomThemeImportUrlChange(
@@ -999,13 +1013,13 @@ function renderAppearanceSection(props: ConfigProps) {
                     ${props.customThemeImportBusy
                       ? "Importing…"
                       : props.hasCustomTheme
-                        ? "Replace custom theme"
-                        : "Import custom theme"}
+                        ? `Replace ${importedName}`
+                        : "Import theme"}
                   </button>
                   ${props.hasCustomTheme
                     ? html`
                         <button class="btn btn--sm danger" @click=${props.onClearCustomTheme}>
-                          Clear custom theme
+                          Clear ${importedName}
                         </button>
                       `
                     : nothing}
@@ -1015,8 +1029,7 @@ function renderAppearanceSection(props: ConfigProps) {
                       <div class="settings-theme-import__meta">
                         <span class="settings-theme-import__meta-label">Loaded</span>
                         <span class="settings-theme-import__meta-value"
-                          >${props.customThemeLabel ?? "Custom"} ·
-                          ${props.customThemeSourceUrl ?? "tweakcn"}</span
+                          >${importedName} · ${props.customThemeSourceUrl ?? "tweakcn"}</span
                         >
                       </div>
                     `
@@ -1035,8 +1048,8 @@ function renderAppearanceSection(props: ConfigProps) {
             `
           : html`
               <p class="settings-theme-import__inline-hint">
-                Click <strong>Custom</strong> to import a tweakcn theme into this browser-local
-                slot.
+                Click <strong>Import</strong> to add one browser-local tweakcn theme. In tweakcn,
+                use Share and paste the copied link here.
               </p>
             `}
       </div>
@@ -1058,6 +1071,26 @@ function renderAppearanceSection(props: ConfigProps) {
                     style="border-radius: ${Math.round(10 * (stop / 50))}px"
                   ></span>
                   <span class="settings-roundness__label">${BORDER_RADIUS_LABELS[stop]}</span>
+                </button>
+              `,
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-appearance__section">
+        <h3 class="settings-appearance__heading">Text size</h3>
+        <div class="settings-text-scale">
+          <div class="settings-text-scale__options">
+            ${TEXT_SCALE_STOPS.map(
+              (stop) => html`
+                <button
+                  type="button"
+                  class="settings-text-scale__btn ${stop === props.textScale ? "active" : ""}"
+                  @click=${() => props.setTextScale(stop)}
+                >
+                  <span class="settings-text-scale__sample">${TEXT_SCALE_LABELS[stop]}</span>
+                  <span class="settings-text-scale__label">${stop}%</span>
                 </button>
               `,
             )}
@@ -1159,15 +1192,13 @@ export function resetConfigViewStateForTests() {
 
 export function renderConfig(props: ConfigProps) {
   const showModeToggle = props.showModeToggle ?? false;
+  const showRootTab = props.showRootTab ?? true;
   const validity = props.valid == null ? "unknown" : props.valid ? "valid" : "invalid";
   const includeVirtualSections = props.includeVirtualSections ?? true;
   const include = props.includeSections?.length ? new Set(props.includeSections) : null;
   const exclude = props.excludeSections?.length ? new Set(props.excludeSections) : null;
-  const rawAnalysis = analyzeConfigSchema(props.schema);
-  const analysis = {
-    schema: scopeSchemaSections(rawAnalysis.schema, { include, exclude }),
-    unsupportedPaths: scopeUnsupportedPaths(rawAnalysis.unsupportedPaths, { include, exclude }),
-  };
+  const scopedSchema = scopeSchemaSections(asConfigSchema(props.schema), { include, exclude });
+  const analysis = analyzeConfigSchema(scopedSchema);
   const formUnsafe = analysis.schema ? analysis.unsupportedPaths.length > 0 : false;
   const rawAvailable = props.rawAvailable ?? true;
   const formMode = showModeToggle && rawAvailable ? props.formMode : "form";
@@ -1221,7 +1252,9 @@ export function renderConfig(props: ConfigProps) {
   const effectiveSubsection = null;
 
   const topTabs = [
-    { key: null as string | null, label: props.navRootLabel ?? "Settings" },
+    ...(showRootTab
+      ? [{ key: null as string | null, label: props.navRootLabel ?? "Settings" }]
+      : []),
     ...[...visibleCategories, ...(otherCategory ? [otherCategory] : [])].flatMap((cat) =>
       cat.sections.map((s) => ({ key: s.key, label: s.label })),
     ),
@@ -1363,6 +1396,11 @@ export function renderConfig(props: ConfigProps) {
     hasChanges &&
     (formMode === "raw" ? true : canSaveForm);
   const canUpdate = props.connected && !props.applying && !props.updating;
+  const renderActionButtonContent = (busy: boolean, label: string, busyLabel: string) =>
+    busy
+      ? html`<span class="config-action-spinner" aria-hidden="true">${icons.loader}</span
+          >${busyLabel}`
+      : label;
 
   const showAppearanceOnRoot =
     includeVirtualSections &&
@@ -1435,14 +1473,29 @@ export function renderConfig(props: ConfigProps) {
               <button class="btn btn--sm" ?disabled=${!hasChanges} @click=${props.onReset}>
                 Clear
               </button>
-              <button class="btn btn--sm primary" ?disabled=${!canSave} @click=${props.onSave}>
-                ${props.saving ? "Saving…" : "Save"}
+              <button
+                class="btn btn--sm primary"
+                ?disabled=${!canSave}
+                aria-busy=${props.saving ? "true" : "false"}
+                @click=${props.onSave}
+              >
+                ${renderActionButtonContent(props.saving, "Save", "Saving…")}
               </button>
-              <button class="btn btn--sm" ?disabled=${!canApply} @click=${props.onApply}>
-                ${props.applying ? "Applying…" : "Apply"}
+              <button
+                class="btn btn--sm"
+                ?disabled=${!canApply}
+                aria-busy=${props.applying ? "true" : "false"}
+                @click=${props.onApply}
+              >
+                ${renderActionButtonContent(props.applying, "Apply", "Applying…")}
               </button>
-              <button class="btn btn--sm" ?disabled=${!canUpdate} @click=${props.onUpdate}>
-                ${props.updating ? "Updating…" : "Update"}
+              <button
+                class="btn btn--sm"
+                ?disabled=${!canUpdate}
+                aria-busy=${props.updating ? "true" : "false"}
+                @click=${props.onUpdate}
+              >
+                ${renderActionButtonContent(props.updating, "Update", "Updating…")}
               </button>
             </div>
           </div>

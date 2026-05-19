@@ -1,5 +1,6 @@
 import { getChannelPlugin, normalizeChannelId } from "../channels/plugins/index.js";
 import { normalizeTargetForProvider } from "../infra/outbound/target-normalization.js";
+import { redactSensitiveFieldValue, redactToolPayloadText } from "../logging/redact.js";
 import { splitMediaFromOutput } from "../media/parse.js";
 import { pluginRegistrationContractRegistry } from "../plugins/contracts/registry.js";
 import {
@@ -9,6 +10,7 @@ import {
 } from "../shared/string-coerce.js";
 import { truncateUtf16Safe } from "../utils.js";
 import { collectTextContentBlocks } from "./content-blocks.js";
+import { isMessageToolSendActionName } from "./pi-embedded-messaging.js";
 import type { MessagingToolSend } from "./pi-embedded-messaging.types.js";
 import { normalizeToolName } from "./tool-policy.js";
 
@@ -114,34 +116,87 @@ function isHostDenialToolText(text: string): boolean {
   return normalized.toLowerCase().includes("approval cannot safely bind");
 }
 
+function redactStringsDeep(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value === "string") {
+    return redactToolPayloadText(value);
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+    seen.add(value);
+    return value.map((item) => redactStringsDeep(item, seen));
+  }
+  if (value && typeof value === "object") {
+    if (seen.has(value)) {
+      return "[Circular]";
+    }
+    seen.add(value);
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      out[key] =
+        typeof child === "string"
+          ? redactSensitiveFieldValue(key, child)
+          : redactStringsDeep(child, seen);
+    }
+    return out;
+  }
+  return value;
+}
+
+export function sanitizeToolArgs(args: unknown): unknown {
+  return redactStringsDeep(args);
+}
+
 export function sanitizeToolResult(result: unknown): unknown {
+  if (typeof result === "string") {
+    return redactToolPayloadText(result);
+  }
+  if (Array.isArray(result)) {
+    return redactStringsDeep(result);
+  }
   if (!result || typeof result !== "object") {
     return result;
   }
   const record = result as Record<string, unknown>;
-  const content = Array.isArray(record.content) ? record.content : null;
-  if (!content) {
-    return record;
+  // Strip image data first so the deep redaction pass doesn't waste work
+  // scanning base64 payloads (and so we capture the original byte counts).
+  const preCleaned: Record<string, unknown> = { ...record };
+  const originalContent = Array.isArray(record.content) ? record.content : null;
+  if (originalContent) {
+    preCleaned.content = originalContent.map((item) => {
+      if (!item || typeof item !== "object") {
+        return item;
+      }
+      const entry = item as Record<string, unknown>;
+      if (readStringValue(entry.type) === "image") {
+        const data = readStringValue(entry.data);
+        const bytes = data ? data.length : undefined;
+        const cleaned = { ...entry };
+        delete cleaned.data;
+        return Object.assign({}, cleaned, { bytes, omitted: true });
+      }
+      return entry;
+    });
   }
-  const sanitized = content.map((item) => {
-    if (!item || typeof item !== "object") {
-      return item;
-    }
-    const entry = item as Record<string, unknown>;
-    const type = readStringValue(entry.type);
-    if (type === "text" && typeof entry.text === "string") {
-      return Object.assign({}, entry, { text: truncateToolText(entry.text) });
-    }
-    if (type === "image") {
-      const data = readStringValue(entry.data);
-      const bytes = data ? data.length : undefined;
-      const cleaned = { ...entry };
-      delete cleaned.data;
-      return Object.assign({}, cleaned, { bytes, omitted: true });
-    }
-    return entry;
-  });
-  return { ...record, content: sanitized };
+  // Deep-redact the entire result so any top-level or nested string is
+  // protected, not just `details` and text content blocks.
+  const baseline = redactStringsDeep(preCleaned) as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...baseline };
+  const content = Array.isArray(baseline.content) ? baseline.content : null;
+  if (content) {
+    out.content = content.map((item) => {
+      if (!item || typeof item !== "object") {
+        return item;
+      }
+      const entry = item as Record<string, unknown>;
+      if (readStringValue(entry.type) === "text" && typeof entry.text === "string") {
+        return Object.assign({}, entry, { text: truncateToolText(entry.text) });
+      }
+      return entry;
+    });
+  }
+  return out;
 }
 
 export function extractToolResultText(result: unknown): string | undefined {
@@ -232,6 +287,21 @@ export function isToolResultMediaTrusted(toolName?: string, result?: unknown): b
   );
 }
 
+function isTrustedOwnedTtsLocalMedia(toolName: string | undefined, result: unknown): boolean {
+  if (
+    !toolName ||
+    !isToolResultMediaTrusted(toolName, result) ||
+    normalizeToolName(toolName) !== "tts"
+  ) {
+    return false;
+  }
+  const media = readToolResultDetails(result)?.media;
+  if (!media || typeof media !== "object" || Array.isArray(media)) {
+    return false;
+  }
+  return (media as Record<string, unknown>).trustedLocalMedia === true;
+}
+
 export function filterToolResultMediaUrls(
   toolName: string | undefined,
   mediaUrls: string[],
@@ -241,17 +311,22 @@ export function filterToolResultMediaUrls(
   if (mediaUrls.length === 0) {
     return mediaUrls;
   }
+  const trustedOwnedTtsLocalMedia = isTrustedOwnedTtsLocalMedia(toolName, result);
   if (isToolResultMediaTrusted(toolName, result)) {
     // When the current run provides its exact registered tool names (core
     // built-ins plus bundled/trusted plugin tools), require the raw emitted
     // tool name to match one of them before allowing local MEDIA: paths.
     // This blocks normalized aliases and case-variant collisions such as
     // "Bash" -> "bash" or "Web_Search" -> "web_search" from inheriting a
-    // registered tool's media trust.
+    // registered tool's media trust. TTS-generated local files carry a
+    // separate trusted-media flag from the owned tool result, so they can
+    // survive runs whose exact built-in set omitted the raw tts name.
     if (builtinToolNames !== undefined) {
-      const registeredName = toolName?.trim();
-      if (!registeredName || !builtinToolNames.has(registeredName)) {
-        return mediaUrls.filter((url) => HTTP_URL_RE.test(url.trim()));
+      if (!trustedOwnedTtsLocalMedia) {
+        const registeredName = toolName?.trim();
+        if (!registeredName || !builtinToolNames.has(registeredName)) {
+          return mediaUrls.filter((url) => HTTP_URL_RE.test(url.trim()));
+        }
       }
     }
     return mediaUrls;
@@ -271,7 +346,7 @@ export function filterToolResultMediaUrls(
  * returns base64 image data but no file path; those need a different delivery
  * path like saving to a temp file).
  */
-export type ToolResultMediaArtifact = {
+type ToolResultMediaArtifact = {
   mediaUrls: string[];
   audioAsVoice?: boolean;
   trustedLocalMedia?: boolean;
@@ -290,16 +365,39 @@ function readToolResultDetailsMedia(
 
 function collectStructuredMediaUrls(media: Record<string, unknown>): string[] {
   const urls: string[] = [];
+  const pushString = (value: unknown) => {
+    if (typeof value !== "string") {
+      return;
+    }
+    const normalized = value.trim();
+    if (normalized) {
+      urls.push(normalized);
+    }
+  };
+  const pushAttachment = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return;
+    }
+    const attachment = value as Record<string, unknown>;
+    pushString(attachment.media);
+    pushString(attachment.path);
+    pushString(attachment.url);
+    pushString(attachment.mediaUrl);
+    pushString(attachment.filePath);
+    pushString(attachment.fileUrl);
+  };
   if (typeof media.mediaUrl === "string" && media.mediaUrl.trim()) {
     urls.push(media.mediaUrl.trim());
   }
   if (Array.isArray(media.mediaUrls)) {
-    urls.push(
-      ...media.mediaUrls
-        .filter((value): value is string => typeof value === "string")
-        .map((value) => value.trim())
-        .filter(Boolean),
-    );
+    for (const value of media.mediaUrls) {
+      pushString(value);
+    }
+  }
+  if (Array.isArray(media.attachments)) {
+    for (const attachment of media.attachments) {
+      pushAttachment(attachment);
+    }
   }
   return Array.from(new Set(urls));
 }
@@ -467,7 +565,7 @@ export function extractMessagingToolSend(
   const action = normalizeOptionalString(args.action) ?? "";
   const accountId = normalizeOptionalString(args.accountId);
   if (toolName === "message") {
-    if (action !== "send" && action !== "thread-reply") {
+    if (!isMessageToolSendActionName(action)) {
       return undefined;
     }
     const toRaw = resolveMessageToolTarget(args);
@@ -480,7 +578,23 @@ export function extractMessagingToolSend(
     const providerId = providerHint ? normalizeChannelId(providerHint) : null;
     const provider = providerId ?? normalizeOptionalLowercaseString(providerHint) ?? "message";
     const to = normalizeTargetForProvider(provider, toRaw);
-    return to ? { tool: toolName, provider, accountId, to } : undefined;
+    const threadId = normalizeOptionalString(args.threadId);
+    const threadSuppressed = args.topLevel === true || args.threadId === null;
+    const threadImplicit =
+      !threadId &&
+      !threadSuppressed &&
+      Boolean(providerId && getChannelPlugin(providerId)?.threading?.resolveAutoThreadId);
+    return to
+      ? {
+          tool: toolName,
+          provider,
+          accountId,
+          to,
+          ...(threadId ? { threadId } : {}),
+          ...(threadImplicit ? { threadImplicit: true } : {}),
+          ...(threadSuppressed ? { threadSuppressed: true } : {}),
+        }
+      : undefined;
   }
   const providerId = normalizeChannelId(toolName);
   if (!providerId) {
@@ -492,12 +606,14 @@ export function extractMessagingToolSend(
     return undefined;
   }
   const to = normalizeTargetForProvider(providerId, extracted.to);
+  const threadId = normalizeOptionalString(extracted.threadId);
   return to
     ? {
         tool: toolName,
         provider: providerId,
         accountId: extracted.accountId ?? accountId,
         to,
+        ...(threadId ? { threadId } : {}),
       }
     : undefined;
 }

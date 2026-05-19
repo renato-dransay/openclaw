@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { captureFullEnv } from "../test-utils/env.js";
+import { mockProcessPlatform } from "../test-utils/vitest-spies.js";
 import { SUPERVISOR_HINT_ENV_VARS } from "./supervisor-markers.js";
 
 const spawnMock = vi.hoisted(() => vi.fn());
 const triggerOpenClawRestartMock = vi.hoisted(() => vi.fn());
+const isContainerEnvironmentMock = vi.hoisted(() => vi.fn(() => false));
 
 vi.mock("node:child_process", async () => {
-  const { mockNodeBuiltinModule } = await import("../../test/helpers/node-builtin-mocks.js");
+  const { mockNodeBuiltinModule } = await import("openclaw/plugin-sdk/test-node-mocks");
   return mockNodeBuiltinModule(
     () => vi.importActual<typeof import("node:child_process")>("node:child_process"),
     {
@@ -17,6 +19,9 @@ vi.mock("node:child_process", async () => {
 vi.mock("./restart.js", () => ({
   triggerOpenClawRestart: (...args: unknown[]) => triggerOpenClawRestartMock(...args),
 }));
+vi.mock("./container-environment.js", () => ({
+  isContainerEnvironment: () => isContainerEnvironmentMock(),
+}));
 
 import {
   respawnGatewayProcessForUpdate,
@@ -26,16 +31,9 @@ import {
 const originalArgv = [...process.argv];
 const originalExecArgv = [...process.execArgv];
 const envSnapshot = captureFullEnv();
-const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 
-function setPlatform(platform: string) {
-  if (!originalPlatformDescriptor) {
-    return;
-  }
-  Object.defineProperty(process, "platform", {
-    ...originalPlatformDescriptor,
-    value: platform,
-  });
+function setPlatform(platform: NodeJS.Platform) {
+  mockProcessPlatform(platform);
 }
 
 afterEach(() => {
@@ -44,9 +42,9 @@ afterEach(() => {
   process.execArgv = [...originalExecArgv];
   spawnMock.mockClear();
   triggerOpenClawRestartMock.mockClear();
-  if (originalPlatformDescriptor) {
-    Object.defineProperty(process, "platform", originalPlatformDescriptor);
-  }
+  isContainerEnvironmentMock.mockReset();
+  isContainerEnvironmentMock.mockReturnValue(false);
+  vi.restoreAllMocks();
 });
 
 function clearSupervisorHints() {
@@ -135,7 +133,7 @@ describe("restartGatewayProcessWithFreshPid", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("spawns detached child with current exec argv", () => {
+  it("uses in-process restart on unmanaged Unix so custom supervisors keep the tracked PID", () => {
     delete process.env.OPENCLAW_NO_RESPAWN;
     clearSupervisorHints();
     setPlatform("linux");
@@ -145,15 +143,11 @@ describe("restartGatewayProcessWithFreshPid", () => {
 
     const result = restartGatewayProcessWithFreshPid();
 
-    expect(result).toEqual({ mode: "spawned", pid: 4242 });
-    expect(spawnMock).toHaveBeenCalledWith(
-      process.execPath,
-      ["--import", "tsx", "/repo/dist/index.js", "gateway", "run"],
-      expect.objectContaining({
-        detached: true,
-        stdio: "inherit",
-      }),
-    );
+    expect(result).toEqual({
+      mode: "disabled",
+      detail: "unmanaged: use in-process restart to keep custom supervisor PID tracking stable",
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it("returns supervised when OPENCLAW_LAUNCHD_LABEL is set (stock launchd plist)", () => {
@@ -187,12 +181,15 @@ describe("restartGatewayProcessWithFreshPid", () => {
     setPlatform("linux");
     process.env.OPENCLAW_SERVICE_MARKER = "openclaw";
     process.env.OPENCLAW_SERVICE_KIND = "gateway";
-    spawnMock.mockReturnValue({ pid: 4242, unref: vi.fn() });
 
     const result = restartGatewayProcessWithFreshPid();
 
-    expect(result).toEqual({ mode: "spawned", pid: 4242 });
+    expect(result).toEqual({
+      mode: "disabled",
+      detail: "unmanaged: use in-process restart to keep custom supervisor PID tracking stable",
+    });
     expect(triggerOpenClawRestartMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it("returns disabled on Windows without Scheduled Task markers", () => {
@@ -203,6 +200,21 @@ describe("restartGatewayProcessWithFreshPid", () => {
 
     expect(result.mode).toBe("disabled");
     expect(result.detail).toContain("Scheduled Task");
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("returns disabled in containers so PID 1 stays alive for in-process restart", () => {
+    delete process.env.OPENCLAW_NO_RESPAWN;
+    clearSupervisorHints();
+    setPlatform("linux");
+    isContainerEnvironmentMock.mockReturnValue(true);
+
+    const result = restartGatewayProcessWithFreshPid();
+
+    expect(result).toEqual({
+      mode: "disabled",
+      detail: "container: use in-process restart to keep PID 1 alive",
+    });
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
@@ -221,7 +233,7 @@ describe("restartGatewayProcessWithFreshPid", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("returns failed when spawn throws", () => {
+  it("does not attempt detached spawn on unmanaged Unix even if spawn would throw", () => {
     delete process.env.OPENCLAW_NO_RESPAWN;
     clearSupervisorHints();
     setPlatform("linux");
@@ -230,8 +242,11 @@ describe("restartGatewayProcessWithFreshPid", () => {
       throw new Error("spawn failed");
     });
     const result = restartGatewayProcessWithFreshPid();
-    expect(result.mode).toBe("failed");
-    expect(result.detail).toContain("spawn failed");
+    expect(result).toEqual({
+      mode: "disabled",
+      detail: "unmanaged: use in-process restart to keep custom supervisor PID tracking stable",
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 });
 
@@ -265,11 +280,26 @@ describe("respawnGatewayProcessForUpdate", () => {
     expect(spawnMock).toHaveBeenCalledWith(
       process.execPath,
       ["C:\\openclaw\\dist\\index.js", "gateway", "run"],
-      expect.objectContaining({
+      {
         detached: true,
         env: process.env,
         stdio: "inherit",
-      }),
+      },
     );
+  });
+
+  it("returns failed when update detached respawn throws", () => {
+    delete process.env.OPENCLAW_NO_RESPAWN;
+    clearSupervisorHints();
+    setPlatform("linux");
+
+    spawnMock.mockImplementation(() => {
+      throw new Error("spawn failed");
+    });
+
+    const result = respawnGatewayProcessForUpdate();
+
+    expect(result.mode).toBe("failed");
+    expect(result.detail).toContain("spawn failed");
   });
 });

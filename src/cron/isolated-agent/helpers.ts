@@ -241,6 +241,17 @@ export function resolveHeartbeatAckMaxChars(agentCfg?: { heartbeat?: { ackMaxCha
   return Math.max(0, raw);
 }
 
+function isMidTurnToolFailureText(text: string | undefined): boolean {
+  const normalized = normalizeOptionalString(text);
+  if (!normalized) {
+    return false;
+  }
+  // tool-display formats failed agent-issued tool calls as "⚠️ 🛠️ <summary>
+  // failed" (the 🛠️ wrench is the tool emoji). Provider/model/run-level
+  // failures use other shapes (plain text or different emoji prefixes).
+  return normalized.startsWith("⚠️ 🛠️") && normalized.endsWith("failed");
+}
+
 function isCronMessagePresentationWarning(text: string | undefined): boolean {
   const normalized = normalizeOptionalString(text)?.toLowerCase();
   return (
@@ -274,12 +285,32 @@ export function resolveCronPayloadOutcome(params: {
   const normalizedFinalAssistantVisibleText = normalizeOptionalString(
     params.finalAssistantVisibleText,
   );
+  // When the trailing error payload is a mid-turn tool-display failure
+  // (format "⚠️ 🛠️ <summary> failed") and the agent went on to produce a
+  // clean final assistant message, treat the final message as an implicit
+  // success payload after the error. Codex's openai-codex bridge surfaces
+  // the final answer via finalAssistantVisibleText but doesn't re-emit it
+  // as a delivery payload when delivery isn't requested, so without this
+  // we'd mark green cron runs as fatal whenever the agent made a harmless
+  // exit-non-zero exec call (e.g. probing `cli.js workflow --help`).
+  // Provider/model/run-level errors use other payload shapes and stay
+  // fatal; the tool-emoji prefix is the discriminator.
+  const finalAssistantTextForRecovery = normalizeOptionalString(params.finalAssistantVisibleText);
+  const finalAssistantTextSignalsRecovery =
+    !params.runLevelError &&
+    Boolean(finalAssistantTextForRecovery) &&
+    !isCronMessagePresentationWarning(finalAssistantTextForRecovery) &&
+    detectCronDenialToken(finalAssistantTextForRecovery) === undefined;
+  const lastErrorPayloadIsMidTurnToolFailure =
+    lastErrorPayloadIndex >= 0 &&
+    isMidTurnToolFailureText(params.payloads[lastErrorPayloadIndex]?.text);
   const hasSuccessfulPayloadAfterLastError =
     !params.runLevelError &&
     lastErrorPayloadIndex >= 0 &&
-    params.payloads
+    (params.payloads
       .slice(lastErrorPayloadIndex + 1)
-      .some((payload) => payload?.isError !== true && Boolean(payload?.text?.trim()));
+      .some((payload) => payload?.isError !== true && Boolean(payload?.text?.trim())) ||
+      (finalAssistantTextSignalsRecovery && lastErrorPayloadIsMidTurnToolFailure));
   const hasSuccessfulPayloadBeforeLastError =
     !params.runLevelError &&
     lastErrorPayloadIndex > 0 &&

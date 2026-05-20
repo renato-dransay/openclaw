@@ -80,6 +80,31 @@ describe("resolveCronPayloadOutcome", () => {
     expect(result.deliveryPayloads).toEqual([{ text: "Final cron report" }]);
   });
 
+  it("treats a clean final assistant message as success-after-error for mid-turn exec failures", () => {
+    const result = resolveCronPayloadOutcome({
+      payloads: [
+        {
+          text: "⚠️ 🛠️ `node ~/.openclaw/runtime/dist/cli.js workflow --help (agent)` failed",
+          isError: true,
+        },
+      ],
+      finalAssistantVisibleText:
+        "STATUS: done\nWORKFLOW_RESULT: completed\nWORKFLOW_COMPLETE: true",
+    });
+
+    expect(result.hasFatalErrorPayload).toBe(false);
+    expect(result.embeddedRunError).toBeUndefined();
+  });
+
+  it("still escalates when the final assistant text itself signals a denial", () => {
+    const result = resolveCronPayloadOutcome({
+      payloads: [{ text: "⚠️ 🛠️ exec failed", isError: true }],
+      finalAssistantVisibleText: "I could not run the requested script.",
+    });
+
+    expect(result.hasFatalErrorPayload).toBe(true);
+  });
+
   it("keeps trailing canvas warnings fatal even when earlier assistant output exists", () => {
     const result = resolveCronPayloadOutcome({
       payloads: [{ text: "Saved report to disk." }, { text: "⚠️ 🖼️ Canvas failed", isError: true }],

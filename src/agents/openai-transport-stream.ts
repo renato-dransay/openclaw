@@ -954,6 +954,27 @@ function shortHash(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
+function normalizeResponsesReplayItemId(
+  id: string | undefined,
+  prefix: string,
+): string | undefined {
+  if (!id) {
+    return undefined;
+  }
+  if (id.length <= OPENAI_RESPONSES_REPLAY_ITEM_ID_MAX_LENGTH) {
+    return id;
+  }
+  return `${prefix}_${shortHash(id)}`;
+}
+
+function isSafeResponsesReplayItemId(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    id.length > 0 &&
+    id.length <= OPENAI_RESPONSES_REPLAY_ITEM_ID_MAX_LENGTH
+  );
+}
+
 const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
 
 function coercePromptCacheKey(sessionId: string | undefined): string | undefined {

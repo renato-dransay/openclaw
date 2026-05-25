@@ -43,7 +43,9 @@ import {
   discoverConfigSecretTargets,
   resolveConfigSecretTargetByPath,
 } from "../secrets/target-registry.js";
+import { isRecord as isPlainRecord } from "../shared/record-coerce.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import { normalizeStringEntries, uniqueValues } from "../shared/string-normalization.js";
 import { formatDocsLink } from "../terminal/links.js";
 import { theme } from "../terminal/theme.js";
 import { shortenHomePath } from "../utils.js";
@@ -382,7 +384,7 @@ function parsePath(raw: string): PathSegment[] {
   if (current) {
     parts.push(current);
   }
-  return parts.map((part) => part.trim()).filter(Boolean);
+  return normalizeStringEntries(parts);
 }
 
 function parseValue(raw: string, opts: ConfigSetParseOpts): unknown {
@@ -404,10 +406,6 @@ function parseValue(raw: string, opts: ConfigSetParseOpts): unknown {
 
 function hasOwnPathKey(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function formatDoctorHint(message: string): string {
@@ -459,7 +457,155 @@ function getAtPath(root: unknown, path: PathSegment[]): { found: boolean; value?
   return { found: true, value: current };
 }
 
-type SetAtPathOptions = { numericObjectKeys?: boolean };
+type JsonSchemaRecord = {
+  type?: unknown;
+  properties?: unknown;
+  additionalProperties?: unknown;
+  items?: unknown;
+  anyOf?: unknown;
+  oneOf?: unknown;
+  allOf?: unknown;
+};
+
+type SetAtPathOptions = {
+  numericObjectKeys?: boolean;
+  schema?: JsonSchemaRecord;
+};
+
+function isSchemaRecord(value: unknown): value is JsonSchemaRecord {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function schemaTypes(schema: JsonSchemaRecord): Set<string> {
+  if (typeof schema.type === "string") {
+    return new Set([schema.type]);
+  }
+  if (Array.isArray(schema.type)) {
+    return new Set(schema.type.filter((entry): entry is string => typeof entry === "string"));
+  }
+  return new Set();
+}
+
+function schemaAlternatives(
+  schema: JsonSchemaRecord,
+  seen = new Set<JsonSchemaRecord>(),
+): JsonSchemaRecord[] {
+  if (seen.has(schema)) {
+    return [];
+  }
+  seen.add(schema);
+  const alternatives: JsonSchemaRecord[] = [schema];
+  for (const key of ["anyOf", "oneOf", "allOf"] as const) {
+    const entries = schema[key];
+    if (!Array.isArray(entries)) {
+      continue;
+    }
+    for (const entry of entries) {
+      if (isSchemaRecord(entry)) {
+        alternatives.push(...schemaAlternatives(entry, seen));
+      }
+    }
+  }
+  return alternatives;
+}
+
+function schemaLooksArray(schema: JsonSchemaRecord): boolean {
+  return (
+    schemaTypes(schema).has("array") || isSchemaRecord(schema.items) || Array.isArray(schema.items)
+  );
+}
+
+function schemaLooksObject(schema: JsonSchemaRecord): boolean {
+  const types = schemaTypes(schema);
+  return (
+    types.has("object") ||
+    isSchemaRecord(schema.properties) ||
+    schema.additionalProperties === true ||
+    isSchemaRecord(schema.additionalProperties)
+  );
+}
+
+function propertySchema(schema: JsonSchemaRecord, segment: PathSegment): JsonSchemaRecord[] {
+  const schemas: JsonSchemaRecord[] = [];
+  for (const alternative of schemaAlternatives(schema)) {
+    if (schemaLooksArray(alternative)) {
+      if (isIndexSegment(segment)) {
+        const index = Number.parseInt(segment, 10);
+        const indexedItem = Array.isArray(alternative.items)
+          ? alternative.items[index]
+          : alternative.items;
+        if (isSchemaRecord(indexedItem)) {
+          schemas.push(indexedItem);
+        }
+      }
+      continue;
+    }
+    const properties = isSchemaRecord(alternative.properties)
+      ? (alternative.properties as Record<string, unknown>)
+      : undefined;
+    const explicit = properties?.[segment];
+    if (isSchemaRecord(explicit)) {
+      schemas.push(explicit);
+      continue;
+    }
+    if (isSchemaRecord(alternative.additionalProperties)) {
+      schemas.push(alternative.additionalProperties);
+    }
+  }
+  return schemas;
+}
+
+function schemasAtPath(schema: JsonSchemaRecord | undefined, path: readonly PathSegment[]) {
+  if (!schema) {
+    return [];
+  }
+  let schemas = [schema];
+  for (const segment of path) {
+    schemas = schemas.flatMap((candidate) => propertySchema(candidate, segment));
+    if (schemas.length === 0) {
+      return [];
+    }
+  }
+  return schemas;
+}
+
+function schemaPrefersArrayAtPath(
+  schema: JsonSchemaRecord | undefined,
+  path: readonly PathSegment[],
+): boolean | undefined {
+  const candidates = schemasAtPath(schema, path).flatMap((candidate) =>
+    schemaAlternatives(candidate),
+  );
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  const hasArray = candidates.some((candidate) => schemaLooksArray(candidate));
+  const hasObject = candidates.some((candidate) => schemaLooksObject(candidate));
+  if (hasArray && !hasObject) {
+    return true;
+  }
+  if (hasObject && !hasArray) {
+    return false;
+  }
+  return undefined;
+}
+
+function shouldCreateArrayForMissingPathSegment(params: {
+  path: readonly PathSegment[];
+  segmentIndex: number;
+  next?: PathSegment;
+  options?: SetAtPathOptions;
+}): boolean {
+  if (!params.next || params.options?.numericObjectKeys || !isIndexSegment(params.next)) {
+    return false;
+  }
+  const parentPath = params.path.slice(0, params.segmentIndex + 1);
+  const schemaPreference = schemaPrefersArrayAtPath(params.options?.schema, parentPath);
+  if (schemaPreference !== undefined) {
+    return schemaPreference;
+  }
+  return true;
+}
 
 function setAtPath(
   root: Record<string, unknown>,
@@ -471,7 +617,12 @@ function setAtPath(
   for (let i = 0; i < path.length - 1; i += 1) {
     const segment = path[i];
     const next = path[i + 1];
-    const nextIsIndex = !options?.numericObjectKeys && Boolean(next && isIndexSegment(next));
+    const nextIsIndex = shouldCreateArrayForMissingPathSegment({
+      path,
+      segmentIndex: i,
+      next,
+      options,
+    });
     if (Array.isArray(current)) {
       if (!isIndexSegment(segment)) {
         throw new Error(`Expected numeric index for array segment "${segment}"`);
@@ -904,7 +1055,7 @@ function buildProviderFromBuilder(opts: ConfigSetOptions): SecretProviderConfig 
 
   let provider: SecretProviderConfig;
   if (source === "env") {
-    const allowlist = (opts.providerAllowlist ?? []).map((entry) => entry.trim()).filter(Boolean);
+    const allowlist = normalizeStringEntries(opts.providerAllowlist);
     for (const envName of allowlist) {
       if (!isValidEnvSecretRefId(envName)) {
         throw new Error(
@@ -951,10 +1102,10 @@ function buildProviderFromBuilder(opts: ConfigSetOptions): SecretProviderConfig 
       ...(opts.providerJsonOnly ? { jsonOnly: true } : {}),
       ...(providerEnv ? { env: providerEnv } : {}),
       ...(opts.providerPassEnv && opts.providerPassEnv.length > 0
-        ? { passEnv: opts.providerPassEnv.map((entry) => entry.trim()).filter(Boolean) }
+        ? { passEnv: normalizeStringEntries(opts.providerPassEnv) }
         : {}),
       ...(opts.providerTrustedDir && opts.providerTrustedDir.length > 0
-        ? { trustedDirs: opts.providerTrustedDir.map((entry) => entry.trim()).filter(Boolean) }
+        ? { trustedDirs: normalizeStringEntries(opts.providerTrustedDir) }
         : {}),
       ...(opts.providerAllowInsecurePath ? { allowInsecurePath: true } : {}),
       ...(opts.providerAllowSymlinkCommand ? { allowSymlinkCommand: true } : {}),
@@ -1425,7 +1576,11 @@ function collectDryRunRefs(params: {
     if (!ref) {
       continue;
     }
-    if (includeAllDiscoveredRefs || targetPaths.has(target.path) || providerAliases.has(ref.provider)) {
+    if (
+      includeAllDiscoveredRefs ||
+      targetPaths.has(target.path) ||
+      providerAliases.has(ref.provider)
+    ) {
       refsByKey.set(secretRefKey(ref), ref);
     }
   }
@@ -1629,6 +1784,14 @@ function formatAutoManagedMetaError(paths: readonly PathSegment[][]): string {
   ].join("\n");
 }
 
+async function loadConfigMutationSchema(): Promise<JsonSchemaRecord | undefined> {
+  try {
+    return structuredClone((await readBestEffortRuntimeConfigSchema()).schema) as JsonSchemaRecord;
+  } catch {
+    return undefined;
+  }
+}
+
 function collectDryRunSchemaErrors(params: { config: OpenClawConfig }): ConfigSetDryRunError[] {
   const validated = validateConfigObjectRawWithPlugins(params.config);
   if (validated.ok) {
@@ -1719,6 +1882,7 @@ async function runConfigOperations(params: {
   // instead of snapshot.config (runtime-merged with defaults).
   // This prevents runtime defaults from leaking into the written config file (issue #6070)
   const next = structuredClone(snapshot.resolved) as Record<string, unknown>;
+  const mutationSchema = await loadConfigMutationSchema();
   const unsetPaths: PathSegment[][] = [];
   const explicitSetPaths: PathSegment[][] = [];
   for (const operation of operations) {
@@ -1731,6 +1895,7 @@ async function runConfigOperations(params: {
     if (operation.mutation === "merge" || (options.merge && operation.mutation !== "replace")) {
       mergeAtPath(next, operation.setPath, operation.value, {
         numericObjectKeys: params.successMode === "patch",
+        schema: mutationSchema,
       });
     } else {
       assertNonDestructiveReplacement({
@@ -1741,6 +1906,7 @@ async function runConfigOperations(params: {
       });
       setAtPath(next, operation.setPath, operation.value, {
         numericObjectKeys: params.successMode === "patch",
+        schema: mutationSchema,
       });
     }
   }
@@ -1810,7 +1976,7 @@ async function runConfigOperations(params: {
       ok: dedupedErrors.length === 0,
       operations: operations.length,
       configPath: shortenHomePath(snapshot.path),
-      inputModes: [...new Set(operations.map((operation) => operation.inputMode))],
+      inputModes: uniqueValues(operations.map((operation) => operation.inputMode)),
       checks: {
         schema: requiresFullSchemaValidation || policyIssueLines.length > 0,
         resolvability: hasJsonMode || hasBuilderMode || hasUnsetMode,

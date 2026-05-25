@@ -93,7 +93,7 @@ openclaw_live_should_include_auth_file_for_provider() {
   local provider
   provider="$(openclaw_live_trim "${1:-}")"
   case "$provider" in
-    codex-cli | openai-codex)
+    codex-cli | openai | openai-codex)
       printf '%s\n' ".codex/auth.json"
       printf '%s\n' ".codex/config.toml"
       ;;
@@ -199,11 +199,11 @@ openclaw_live_append_array() {
   local source_array="${2:?source array required}"
   local count
 
-  eval "count=\${#$source_array[@]}"
+  eval "count=\${#${source_array}[@]}"
   if ((count == 0)); then
     return 0
   fi
-  eval "$target_array+=(\"\${$source_array[@]}\")"
+  eval "${target_array}+=(\"\${${source_array}[@]}\")"
 }
 
 openclaw_live_stage_auth_into_home() {

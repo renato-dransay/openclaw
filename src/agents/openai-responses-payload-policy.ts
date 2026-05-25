@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readStringValue } from "../shared/string-coerce.js";
+import { asBoolean } from "../utils/boolean.js";
 import { supportsOpenAIReasoningEffort } from "./openai-reasoning-effort.js";
 
 const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
@@ -223,8 +224,7 @@ function readCompatPayloadBoolean(
   if (!compat || typeof compat !== "object") {
     return undefined;
   }
-  const value = (compat as Record<string, unknown>)[key];
-  return typeof value === "boolean" ? value : undefined;
+  return asBoolean((compat as Record<string, unknown>)[key]);
 }
 
 function resolveOpenAIResponsesPayloadCapabilities(

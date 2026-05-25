@@ -847,38 +847,46 @@ async function startLocalSutDaemon(params: {
   const requestLog = path.join(params.outputDir, "mock-openai-requests.ndjson");
   const mockLog = path.join(params.outputDir, "mock-openai.log");
   const gatewayLog = path.join(params.outputDir, "gateway.log");
-  const mockPid = spawnDaemon({
-    command: "node",
-    args: ["scripts/e2e/mock-openai-server.mjs"],
-    cwd: params.repoRoot,
-    env: mockServerEnv({ ...params, requestLog }),
-    logPath: mockLog,
-  });
-  if (!mockPid) {
-    throw new Error("mock-openai did not start.");
-  }
-  await waitForLog(mockLog, /mock-openai listening/u, "mock-openai", 10_000);
+  let mockPid: number | undefined;
+  let gatewayPid: number | undefined;
+  try {
+    mockPid = spawnDaemon({
+      command: "node",
+      args: ["scripts/e2e/mock-openai-server.mjs"],
+      cwd: params.repoRoot,
+      env: mockServerEnv({ ...params, requestLog }),
+      logPath: mockLog,
+    });
+    if (!mockPid) {
+      throw new Error("mock-openai did not start.");
+    }
+    await waitForLog(mockLog, /mock-openai listening/u, "mock-openai", 10_000);
 
-  const gatewayPid = spawnDaemon({
-    command: "pnpm",
-    args: ["openclaw", "gateway", "--port", String(params.gatewayPort)],
-    cwd: params.repoRoot,
-    env: gatewayEnv({ ...config, sutToken: params.sutToken }),
-    logPath: gatewayLog,
-  });
-  if (!gatewayPid) {
-    throw new Error("gateway did not start.");
+    gatewayPid = spawnDaemon({
+      command: "pnpm",
+      args: ["openclaw", "gateway", "--port", String(params.gatewayPort)],
+      cwd: params.repoRoot,
+      env: gatewayEnv({ ...config, sutToken: params.sutToken }),
+      logPath: gatewayLog,
+    });
+    if (!gatewayPid) {
+      throw new Error("gateway did not start.");
+    }
+    await waitForLog(gatewayLog, /\[gateway\] ready/u, "gateway", 60_000);
+    return {
+      ...config,
+      drained,
+      gatewayLog,
+      gatewayPid,
+      mockLog,
+      mockPid,
+      requestLog,
+    };
+  } catch (error) {
+    killPidTree(gatewayPid);
+    killPidTree(mockPid);
+    throw error;
   }
-  await waitForLog(gatewayLog, /\[gateway\] ready/u, "gateway", 60_000);
-  return {
-    ...config,
-    drained,
-    gatewayLog,
-    gatewayPid,
-    mockLog,
-    mockPid,
-    requestLog,
-  };
 }
 
 function extractLeaseId(output: string) {
@@ -1633,20 +1641,21 @@ async function startSession(root: string, opts: Options, outputDir: string) {
   }
 
   requireUserDriverScript(opts);
-  const credential = await leaseCredential({ localRoot, opts, root });
-  const sut = opts.sutUsername
-    ? { id: "", username: opts.sutUsername }
-    : await sutIdentity(credential.sutToken);
-  const stateArchive = await prepareRemoteState({ localRoot, opts, root });
+  let credential: Awaited<ReturnType<typeof leaseCredential>> | undefined;
   let leaseId = opts.leaseId;
   let createdLease = false;
-  if (!leaseId) {
-    leaseId = await warmupCrabbox(opts, root);
-    createdLease = true;
-  }
-  const inspect = await inspectCrabbox(opts, root, leaseId);
   let localSut: Awaited<ReturnType<typeof startLocalSutDaemon>> | undefined;
   try {
+    credential = await leaseCredential({ localRoot, opts, root });
+    const sut = opts.sutUsername
+      ? { id: "", username: opts.sutUsername }
+      : await sutIdentity(credential.sutToken);
+    const stateArchive = await prepareRemoteState({ localRoot, opts, root });
+    if (!leaseId) {
+      leaseId = await warmupCrabbox(opts, root);
+      createdLease = true;
+    }
+    const inspect = await inspectCrabbox(opts, root, leaseId);
     await writeRemoteSessionScripts({
       inspect,
       localRoot,
@@ -1712,7 +1721,9 @@ async function startSession(root: string, opts: Options, outputDir: string) {
   } catch (error) {
     killPidTree(localSut?.gatewayPid);
     killPidTree(localSut?.mockPid);
-    await releaseCredential(root, opts, credential.leaseFile).catch(() => {});
+    if (credential) {
+      await releaseCredential(root, opts, credential.leaseFile).catch(() => {});
+    }
     if (leaseId && createdLease) {
       await stopCrabbox(root, opts, leaseId).catch(() => {});
     }

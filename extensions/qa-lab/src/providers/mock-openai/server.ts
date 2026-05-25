@@ -1003,8 +1003,8 @@ function buildAssistantText(
         : scenarioToolOutput;
   const orbitCode = extractOrbitCode(memorySnippet) ?? extractOrbitCode(allInputText);
   const mediaPath = /MEDIA:([^\n]+)/.exec(toolOutput)?.[1]?.trim();
-  const exactReplyDirective =
-    extractExactReplyDirective(prompt) ?? extractExactReplyDirective(allInputText);
+  const promptExactReplyDirective = extractExactReplyDirective(prompt);
+  const exactReplyDirective = promptExactReplyDirective ?? extractExactReplyDirective(allInputText);
   const exactMarkerDirective =
     extractExactMarkerDirective(prompt) ?? extractExactMarkerDirective(allInputText);
   const finishExactlyDirective =
@@ -1041,6 +1041,9 @@ function buildAssistantText(
   }
   if (/\bmarker\b/i.test(allInputText) && exactMarkerDirective) {
     return exactMarkerDirective;
+  }
+  if (promptExactReplyDirective) {
+    return promptExactReplyDirective;
   }
   if (/visible skill marker/i.test(prompt)) {
     return "VISIBLE-SKILL-OK";
@@ -1907,6 +1910,128 @@ async function buildResponsesPayload(
     }
     if (shadowTrialEvidenceText.includes("# Dreaming shadow trial brief")) {
       return buildToolCallEventsWithArgs("read", { path: "DREAMING_CANDIDATE_EVIDENCE.md" });
+    }
+  }
+  if (/personal share-safe diagnostics check/i.test(allInputText)) {
+    const diagnosticsEvidenceText = extractAllToolOutputText(input);
+    if (/successfully (?:wrote|created|updated|replaced)/i.test(diagnosticsEvidenceText)) {
+      return buildAssistantEvents(
+        [
+          "Artifact: personal-diagnostics-summary.txt",
+          "Status: share-safe diagnostics summary ready",
+          "PERSONAL-DIAGNOSTICS-SAFE-OK",
+        ].join("\n"),
+      );
+    }
+    if (
+      !diagnosticsEvidenceText ||
+      (!diagnosticsEvidenceText.includes("# Personal diagnostics request") &&
+        !diagnosticsEvidenceText.includes("# Raw personal diagnostics fixture"))
+    ) {
+      return buildToolCallEventsWithArgs("read", { path: "DIAGNOSTICS_REQUEST.md" });
+    }
+    if (
+      diagnosticsEvidenceText.includes("# Personal diagnostics request") &&
+      diagnosticsEvidenceText.includes("# Raw personal diagnostics fixture")
+    ) {
+      return buildToolCallEventsWithArgs("write", {
+        path: "personal-diagnostics-summary.txt",
+        content: [
+          "Status: blocked waiting for explicit publish approval",
+          "Affected surface: telegram direct message",
+          "Omitted content: raw chat text, raw tool output, account id, message id, and fake secret",
+          "Redaction confirmed: yes",
+          "Next step: ask maintainer whether manually landed commits can count for contributor credit",
+        ].join("\n"),
+      });
+    }
+    if (diagnosticsEvidenceText.includes("# Personal diagnostics request")) {
+      return buildToolCallEventsWithArgs("read", { path: "PERSONAL_DIAGNOSTICS_RAW.md" });
+    }
+  }
+  if (/personal no-fake-progress check/i.test(allInputText)) {
+    const progressEvidenceText = [
+      extractAllToolOutputText(input),
+      extractUserTextAfterLatestToolOutput(input),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    if (/successfully (?:wrote|created|updated|replaced)/i.test(progressEvidenceText)) {
+      return buildAssistantEvents(
+        [
+          "Artifact: personal-progress-proof.txt",
+          "Status: local proof artifact written",
+          "External status: not sent, not published, not uploaded, not merged",
+          "PERSONAL-NO-FAKE-PROGRESS-OK",
+        ].join("\n"),
+      );
+    }
+    if (
+      !progressEvidenceText ||
+      (!progressEvidenceText.includes("# Progress request") &&
+        !progressEvidenceText.includes("# Progress evidence"))
+    ) {
+      return buildToolCallEventsWithArgs("read", { path: "PROGRESS_REQUEST.md" });
+    }
+    if (
+      progressEvidenceText.includes("# Progress request") &&
+      progressEvidenceText.includes("# Progress evidence")
+    ) {
+      return buildToolCallEventsWithArgs("write", {
+        path: "personal-progress-proof.txt",
+        content: [
+          "Personal no-fake-progress",
+          "Status: local proof artifact written",
+          "External status: not sent; not published; not uploaded; not merged",
+          "Evidence: PROGRESS_REQUEST.md and PROGRESS_EVIDENCE.md were read before this artifact was written",
+        ].join("\n"),
+      });
+    }
+    if (progressEvidenceText.includes("# Progress request")) {
+      return buildToolCallEventsWithArgs("read", { path: "PROGRESS_EVIDENCE.md" });
+    }
+  }
+  if (/personal failure recovery check/i.test(allInputText)) {
+    const recoveryEvidenceText = [
+      extractAllToolOutputText(input),
+      extractUserTextAfterLatestToolOutput(input),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    if (/successfully (?:wrote|created|updated|replaced)/i.test(recoveryEvidenceText)) {
+      return buildAssistantEvents(
+        [
+          "Artifact: personal-failure-recovery.txt",
+          "Failed step: external calendar update was not attempted",
+          "Retry boundary: do not retry until approval is given",
+          "PERSONAL-FAILURE-RECOVERY-OK",
+        ].join("\n"),
+      );
+    }
+    if (
+      !recoveryEvidenceText ||
+      (!recoveryEvidenceText.includes("# Failure recovery request") &&
+        !recoveryEvidenceText.includes("# Failure recovery evidence"))
+    ) {
+      return buildToolCallEventsWithArgs("read", { path: "FAILURE_RECOVERY_REQUEST.md" });
+    }
+    if (
+      recoveryEvidenceText.includes("# Failure recovery request") &&
+      recoveryEvidenceText.includes("# Failure recovery evidence")
+    ) {
+      return buildToolCallEventsWithArgs("write", {
+        path: "personal-failure-recovery.txt",
+        content: [
+          "Personal failure recovery",
+          "Completed: request reviewed and local evidence captured",
+          "Failed step: external calendar update was not attempted because explicit approval is missing",
+          "Retry boundary: do not retry the external step until approval is given",
+          "Next step: ask for approval before any external update",
+        ].join("\n"),
+      });
+    }
+    if (recoveryEvidenceText.includes("# Failure recovery request")) {
+      return buildToolCallEventsWithArgs("read", { path: "FAILURE_RECOVERY_EVIDENCE.md" });
     }
   }
   if (/lobster invaders/i.test(prompt)) {

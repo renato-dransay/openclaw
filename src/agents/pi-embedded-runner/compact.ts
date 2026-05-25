@@ -72,7 +72,10 @@ import {
 import { isFallbackSummaryError, runWithModelFallback } from "../model-fallback.js";
 import { supportsModelTools } from "../model-tool-support.js";
 import { ensureOpenClawModelsJson } from "../models-config.js";
-import { resolveContextConfigProviderForRuntime } from "../openai-codex-routing.js";
+import {
+  resolveContextConfigProviderForRuntime,
+  resolveOpenAICompactionRuntimeProvider,
+} from "../openai-codex-routing.js";
 import { createBundleLspToolRuntime } from "../pi-bundle-lsp-runtime.js";
 import { createBundleMcpToolRuntime } from "../pi-bundle-mcp-tools.js";
 import { ensureSessionHeader } from "../pi-embedded-helpers.js";
@@ -207,6 +210,7 @@ function prepareCompactionSessionAgent(params: {
     signal: params.signal,
     model: params.effectiveModel,
     resolvedApiKey: params.resolvedApiKey,
+    authProfileId: params.runtimePlan?.auth.forwardedAuthProfileId,
     authStorage: params.authStorage as never,
   });
   const providerTextTransforms = resolveProviderTextTransforms({
@@ -495,9 +499,29 @@ async function compactEmbeddedPiSessionDirectOnce(
     defaultProvider: DEFAULT_PROVIDER,
     defaultModel: DEFAULT_MODEL,
   });
-  const provider = resolvedCompactionTarget.provider ?? DEFAULT_PROVIDER;
+  const modelConfigProvider = resolvedCompactionTarget.provider ?? DEFAULT_PROVIDER;
   const modelId = resolvedCompactionTarget.model ?? DEFAULT_MODEL;
   const authProfileId = resolvedCompactionTarget.authProfileId;
+  const earlyAgentIds = resolveSessionAgentIds({
+    sessionKey: params.sessionKey,
+    config: params.config,
+  });
+  const runtimeHarnessPolicy = resolveAgentHarnessPolicy({
+    provider: modelConfigProvider,
+    modelId,
+    config: params.config,
+    agentId: earlyAgentIds.sessionAgentId,
+    sessionKey: params.sessionKey,
+  });
+  const selectedHarnessRuntime = params.agentHarnessId ?? runtimeHarnessPolicy.runtime;
+  const provider = resolveOpenAICompactionRuntimeProvider({
+    provider: modelConfigProvider,
+    harnessRuntime: runtimeHarnessPolicy.runtime,
+    agentHarnessId: params.agentHarnessId,
+    authProfileId,
+    config: params.config,
+    workspaceDir: resolvedWorkspace,
+  });
   let thinkLevel: ThinkLevel = params.thinkLevel ?? "off";
   const attemptedThinking = new Set<ThinkLevel>();
   const fail = (reason: string, err?: unknown): EmbeddedPiCompactResult => {
@@ -526,10 +550,6 @@ async function compactEmbeddedPiSessionDirectOnce(
         : undefined,
     };
   };
-  const earlyAgentIds = resolveSessionAgentIds({
-    sessionKey: params.sessionKey,
-    config: params.config,
-  });
   const agentDir =
     params.agentDir ?? resolveAgentDir(params.config ?? {}, earlyAgentIds.sessionAgentId);
   await ensureOpenClawModelsJson(params.config, agentDir, {
@@ -614,10 +634,7 @@ async function compactEmbeddedPiSessionDirectOnce(
     sessionId: params.sessionId,
     cwd: effectiveWorkspace,
   });
-  const { sessionAgentId: effectiveSkillAgentId } = resolveSessionAgentIds({
-    sessionKey: params.sessionKey,
-    config: params.config,
-  });
+  const effectiveSkillAgentId = earlyAgentIds.sessionAgentId;
 
   let restoreSkillEnv: (() => void) | undefined;
   let compactionSessionManager: unknown = null;
@@ -669,18 +686,11 @@ async function compactEmbeddedPiSessionDirectOnce(
     // Apply contextTokens cap to model so pi-coding-agent's auto-compaction
     // threshold uses the effective limit, not the native context window.
     const runtimeModelWithContext = runtimeModel as ProviderRuntimeModel;
-    const runtimeHarnessPolicy = resolveAgentHarnessPolicy({
-      provider,
-      modelId,
-      config: params.config,
-      agentId: effectiveSkillAgentId,
-      sessionKey: params.sessionKey,
-    });
     const ctxInfo = resolveContextWindowInfo({
       cfg: params.config,
       provider: resolveContextConfigProviderForRuntime({
-        provider,
-        runtimeId: runtimeHarnessPolicy.runtime,
+        provider: modelConfigProvider,
+        runtimeId: selectedHarnessRuntime,
       }),
       modelId,
       modelContextTokens: readPiModelContextTokens(runtimeModel),
@@ -741,7 +751,6 @@ async function compactEmbeddedPiSessionDirectOnce(
       senderName: params.senderName,
       senderUsername: params.senderUsername,
       senderE164: params.senderE164,
-      senderIsOwner: params.senderIsOwner,
       allowGatewaySubagentBinding: params.allowGatewaySubagentBinding,
       agentDir,
       workspaceDir: effectiveWorkspace,
@@ -808,10 +817,13 @@ async function compactEmbeddedPiSessionDirectOnce(
       senderName: params.senderName,
       senderUsername: params.senderUsername,
       senderE164: params.senderE164,
-      senderIsOwner: params.senderIsOwner,
       warn: (message) => log.warn(message),
     });
-    const effectiveTools = [...tools, ...filteredBundledTools];
+    const normalizedBundledTools =
+      filteredBundledTools.length > 0
+        ? runtimePlan.tools.normalize(filteredBundledTools, runtimePlanModelContext)
+        : filteredBundledTools;
+    const effectiveTools = [...tools, ...normalizedBundledTools];
     const allowedToolNames = collectAllowedToolNames({ tools: effectiveTools });
     runtimePlan.tools.logDiagnostics(effectiveTools, runtimePlanModelContext);
     const machineName = await getMachineDisplayName();
@@ -847,7 +859,6 @@ async function compactEmbeddedPiSessionDirectOnce(
             sessionId: params.sessionId,
             agentId: sessionAgentId,
             senderId: params.senderId,
-            senderIsOwner: params.senderIsOwner,
           }),
         )
       : undefined;
@@ -1033,6 +1044,7 @@ async function compactEmbeddedPiSessionDirectOnce(
       const extensionFactories = buildEmbeddedExtensionFactories({
         cfg: params.config,
         sessionManager,
+        workspaceDir: effectiveWorkspace,
         provider,
         modelId,
         model,
@@ -1144,6 +1156,7 @@ async function compactEmbeddedPiSessionDirectOnce(
             sessionManager,
             sessionId: params.sessionId,
             policy: transcriptPolicy,
+            preserveLatestAssistantThinking: false,
           });
           const validated = await validateReplayTurns({
             messages: prior,

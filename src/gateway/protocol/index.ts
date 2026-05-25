@@ -1,4 +1,5 @@
 import AjvPkg, { type AnySchema, type ErrorObject, type ValidateFunction } from "ajv";
+import { uniqueStrings } from "../../shared/string-normalization.js";
 import type { SessionsPatchResult } from "../session-utils.types.js";
 import {
   type AgentEvent,
@@ -71,6 +72,10 @@ import {
   TalkClientCreateParamsSchema,
   type TalkClientCreateResult,
   TalkClientCreateResultSchema,
+  type TalkAgentControlResult,
+  TalkAgentControlResultSchema,
+  type TalkClientSteerParams,
+  TalkClientSteerParamsSchema,
   type TalkClientToolCallParams,
   TalkClientToolCallParamsSchema,
   type TalkClientToolCallResult,
@@ -97,6 +102,8 @@ import {
   TalkSessionJoinResultSchema,
   type TalkSessionOkResult,
   TalkSessionOkResultSchema,
+  type TalkSessionSteerParams,
+  TalkSessionSteerParamsSchema,
   type TalkSessionSubmitToolResultParams,
   TalkSessionSubmitToolResultParamsSchema,
   type TalkSessionTurnResult,
@@ -672,6 +679,12 @@ export const validateTalkClientToolCallParams = lazyCompile<TalkClientToolCallPa
 export const validateTalkClientToolCallResult = lazyCompile<TalkClientToolCallResult>(
   TalkClientToolCallResultSchema,
 );
+export const validateTalkClientSteerParams = lazyCompile<TalkClientSteerParams>(
+  TalkClientSteerParamsSchema,
+);
+export const validateTalkAgentControlResult = lazyCompile<TalkAgentControlResult>(
+  TalkAgentControlResultSchema,
+);
 export const validateTalkSessionCreateParams = lazyCompile<TalkSessionCreateParams>(
   TalkSessionCreateParamsSchema,
 );
@@ -698,6 +711,9 @@ export const validateTalkSessionCancelOutputParams = lazyCompile<TalkSessionCanc
 );
 export const validateTalkSessionTurnResult = lazyCompile<TalkSessionTurnResult>(
   TalkSessionTurnResultSchema,
+);
+export const validateTalkSessionSteerParams = lazyCompile<TalkSessionSteerParams>(
+  TalkSessionSteerParamsSchema,
 );
 export const validateTalkSessionSubmitToolResultParams =
   lazyCompile<TalkSessionSubmitToolResultParams>(TalkSessionSubmitToolResultParamsSchema);
@@ -841,7 +857,7 @@ export function formatValidationErrors(errors: ErrorObject[] | null | undefined)
   }
 
   // De-dupe while preserving order.
-  const unique = Array.from(new Set(parts.filter((part) => part.trim())));
+  const unique = uniqueStrings(parts.filter((part) => part.trim()));
   if (!unique.length) {
     const fallback = getAjv().errorsText(errors, { separator: "; " });
     return fallback || "unknown validation error";
@@ -948,6 +964,8 @@ export {
   TalkCatalogResultSchema,
   TalkClientCreateParamsSchema,
   TalkClientCreateResultSchema,
+  TalkAgentControlResultSchema,
+  TalkClientSteerParamsSchema,
   TalkClientToolCallParamsSchema,
   TalkClientToolCallResultSchema,
   TalkConfigParamsSchema,
@@ -961,6 +979,7 @@ export {
   TalkSessionJoinResultSchema,
   TalkSessionTurnParamsSchema,
   TalkSessionTurnResultSchema,
+  TalkSessionSteerParamsSchema,
   TalkSessionSubmitToolResultParamsSchema,
   TalkSessionCloseParamsSchema,
   TalkSessionOkResultSchema,
@@ -1081,6 +1100,8 @@ export type {
   TalkCatalogResult,
   TalkClientCreateParams,
   TalkClientCreateResult,
+  TalkClientSteerParams,
+  TalkAgentControlResult,
   TalkClientToolCallParams,
   TalkClientToolCallResult,
   TalkConfigParams,
@@ -1094,6 +1115,7 @@ export type {
   TalkSessionJoinResult,
   TalkSessionTurnParams,
   TalkSessionTurnResult,
+  TalkSessionSteerParams,
   TalkSessionSubmitToolResultParams,
   TalkSessionCloseParams,
   TalkSessionOkResult,

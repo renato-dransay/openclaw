@@ -524,6 +524,15 @@ run_quiet_step() {
     return 1
 }
 
+run_required_step() {
+    local title="$1"
+    shift
+    if run_quiet_step "$title" "$@"; then
+        return 0
+    fi
+    exit 1
+}
+
 cleanup_legacy_submodules() {
     local repo_dir="$1"
     local legacy_dir="$repo_dir/Peekaboo"
@@ -880,6 +889,7 @@ run_npm_global_install() {
         return $?
     fi
 
+    ui_info "Installing OpenClaw package"
     "${cmd[@]}" >"$log" 2>&1
 }
 
@@ -1232,10 +1242,18 @@ parse_args() {
                 shift
                 ;;
             --install-method|--method)
+                if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                    ui_error "Missing value for $1"
+                    return 2
+                fi
                 INSTALL_METHOD="$2"
                 shift 2
                 ;;
             --version)
+                if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                    ui_error "Missing value for $1"
+                    return 2
+                fi
                 OPENCLAW_VERSION="$2"
                 shift 2
                 ;;
@@ -1252,6 +1270,10 @@ parse_args() {
                 shift
                 ;;
             --git-dir|--dir)
+                if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                    ui_error "Missing value for $1"
+                    return 2
+                fi
                 GIT_DIR="$2"
                 shift 2
                 ;;
@@ -1260,7 +1282,8 @@ parse_args() {
                 shift
                 ;;
             *)
-                shift
+                ui_error "Unknown option: $1"
+                return 2
                 ;;
         esac
     done
@@ -1733,9 +1756,9 @@ finish_linux_node_install() {
 install_node_with_apk() {
     ui_info "Installing Node.js via apk (Alpine Linux detected)"
     if is_root; then
-        run_quiet_step "Installing Node.js" apk add --no-cache nodejs npm
+        run_required_step "Installing Node.js" apk add --no-cache nodejs npm
     else
-        run_quiet_step "Installing Node.js" sudo apk add --no-cache nodejs npm
+        run_required_step "Installing Node.js" sudo apk add --no-cache nodejs npm
     fi
 
     activate_supported_node_on_path || true
@@ -1749,9 +1772,9 @@ install_node_with_apk() {
     ui_warn "Alpine nodejs package installed ${apk_node_version}, below required v${NODE_MIN_VERSION}+"
     ui_info "Trying Alpine nodejs-current package"
     if is_root; then
-        run_quiet_step "Installing nodejs-current" apk add --no-cache nodejs-current npm
+        run_required_step "Installing nodejs-current" apk add --no-cache nodejs-current npm
     else
-        run_quiet_step "Installing nodejs-current" sudo apk add --no-cache nodejs-current npm
+        run_required_step "Installing nodejs-current" sudo apk add --no-cache nodejs-current npm
     fi
 
     activate_supported_node_on_path || true
@@ -1796,9 +1819,9 @@ install_node() {
         if command -v pacman &> /dev/null || is_arch_linux; then
             ui_info "Installing Node.js via pacman (Arch-based distribution detected)"
             if is_root; then
-                run_quiet_step "Installing Node.js" pacman -Sy --noconfirm nodejs npm
+                run_required_step "Installing Node.js" pacman -Sy --noconfirm nodejs npm
             else
-                run_quiet_step "Installing Node.js" sudo pacman -Sy --noconfirm nodejs npm
+                run_required_step "Installing Node.js" sudo pacman -Sy --noconfirm nodejs npm
             fi
             finish_linux_node_install
             return 0
@@ -1813,35 +1836,35 @@ install_node() {
         if command -v apt-get &> /dev/null; then
             local tmp
             tmp="$(mktempfile)"
-            run_quiet_step "Downloading NodeSource setup script" download_file "https://deb.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
+            run_required_step "Downloading NodeSource setup script" download_file "https://deb.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
             if is_root; then
-                run_quiet_step "Configuring NodeSource repository" bash "$tmp"
-                run_quiet_step "Installing Node.js" apt_get_install nodejs
+                run_required_step "Configuring NodeSource repository" bash "$tmp"
+                run_required_step "Installing Node.js" apt_get_install nodejs
             else
-                run_quiet_step "Configuring NodeSource repository" sudo -E bash "$tmp"
-                run_quiet_step "Installing Node.js" apt_get_install nodejs
+                run_required_step "Configuring NodeSource repository" sudo -E bash "$tmp"
+                run_required_step "Installing Node.js" apt_get_install nodejs
             fi
         elif command -v dnf &> /dev/null; then
             local tmp
             tmp="$(mktempfile)"
-            run_quiet_step "Downloading NodeSource setup script" download_file "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
+            run_required_step "Downloading NodeSource setup script" download_file "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
             if is_root; then
-                run_quiet_step "Configuring NodeSource repository" bash "$tmp"
-                run_quiet_step "Installing Node.js" dnf install -y -q nodejs
+                run_required_step "Configuring NodeSource repository" bash "$tmp"
+                run_required_step "Installing Node.js" dnf install -y -q nodejs
             else
-                run_quiet_step "Configuring NodeSource repository" sudo bash "$tmp"
-                run_quiet_step "Installing Node.js" sudo dnf install -y -q nodejs
+                run_required_step "Configuring NodeSource repository" sudo bash "$tmp"
+                run_required_step "Installing Node.js" sudo dnf install -y -q nodejs
             fi
         elif command -v yum &> /dev/null; then
             local tmp
             tmp="$(mktempfile)"
-            run_quiet_step "Downloading NodeSource setup script" download_file "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
+            run_required_step "Downloading NodeSource setup script" download_file "https://rpm.nodesource.com/setup_${NODE_DEFAULT_MAJOR}.x" "$tmp"
             if is_root; then
-                run_quiet_step "Configuring NodeSource repository" bash "$tmp"
-                run_quiet_step "Installing Node.js" yum install -y -q nodejs
+                run_required_step "Configuring NodeSource repository" bash "$tmp"
+                run_required_step "Installing Node.js" yum install -y -q nodejs
             else
-                run_quiet_step "Configuring NodeSource repository" sudo bash "$tmp"
-                run_quiet_step "Installing Node.js" sudo yum install -y -q nodejs
+                run_required_step "Configuring NodeSource repository" sudo bash "$tmp"
+                run_required_step "Installing Node.js" sudo yum install -y -q nodejs
             fi
         else
             ui_error "Could not detect package manager"
@@ -1901,6 +1924,7 @@ require_sudo() {
 
 install_git() {
     if [[ "$OS" == "macos" ]]; then
+        install_homebrew
         run_quiet_step "Installing Git" brew install git
     elif [[ "$OS" == "linux" ]]; then
         require_sudo
@@ -2256,7 +2280,7 @@ ensure_user_local_bin_on_path() {
 
 npm_global_bin_dir() {
     local prefix=""
-    prefix="$(npm prefix -g 2>/dev/null || true)"
+    prefix="$(bounded_probe_output "npm prefix -g" npm prefix -g || true)"
     if [[ -n "$prefix" ]]; then
         if [[ "$prefix" == /* ]]; then
             echo "${prefix%/}/bin"
@@ -2264,7 +2288,7 @@ npm_global_bin_dir() {
         fi
     fi
 
-    prefix="$(npm config get prefix 2>/dev/null || true)"
+    prefix="$(bounded_probe_output "npm config get prefix" npm config get prefix || true)"
     if [[ -n "$prefix" && "$prefix" != "undefined" && "$prefix" != "null" ]]; then
         if [[ "$prefix" == /* ]]; then
             echo "${prefix%/}/bin"
@@ -2483,6 +2507,51 @@ maybe_nodenv_rehash() {
     fi
 }
 
+bounded_probe_output() {
+    local label="$1"
+    shift
+    local timeout_seconds="${OPENCLAW_INSTALL_PROBE_TIMEOUT_SECONDS:-5}"
+    local output_file status_file timeout_file pid watchdog status
+    output_file="$(mktemp)"
+    status_file="$(mktemp)"
+    timeout_file="$(mktemp)"
+    TMPFILES+=("$output_file" "$status_file" "$timeout_file")
+
+    (
+        "$@" >"$output_file" 2>/dev/null
+        printf '%s' "$?" >"$status_file"
+    ) &
+    pid="$!"
+
+    (
+        sleep "$timeout_seconds"
+        if kill -0 "$pid" 2>/dev/null; then
+            printf '1' >"$timeout_file"
+            kill "$pid" 2>/dev/null || true
+            sleep 0.1
+            kill -9 "$pid" 2>/dev/null || true
+            printf 'timeout' >"$status_file"
+        fi
+    ) &
+    watchdog="$!"
+
+    wait "$pid" 2>/dev/null || true
+    kill "$watchdog" 2>/dev/null || true
+    wait "$watchdog" 2>/dev/null || true
+
+    status="$(cat "$status_file" 2>/dev/null || true)"
+    if [[ -s "$timeout_file" || "$status" == "timeout" ]]; then
+        echo "Warning: timed out during installer finalization probe: ${label}" >&2
+        return 124
+    fi
+
+    cat "$output_file" 2>/dev/null || true
+    if [[ -n "$status" && "$status" =~ ^[0-9]+$ ]]; then
+        return "$status"
+    fi
+    return 1
+}
+
 warn_openclaw_not_found() {
     ui_warn "Installed, but openclaw is not discoverable on PATH in this shell"
     echo "  Try: hash -r (bash) or rehash (zsh), then retry."
@@ -2496,7 +2565,7 @@ warn_openclaw_not_found() {
     fi
 
     local npm_prefix=""
-    npm_prefix="$(npm prefix -g 2>/dev/null || true)"
+    npm_prefix="$(bounded_probe_output "npm prefix -g" npm prefix -g || true)"
     local npm_bin=""
     npm_bin="$(npm_global_bin_dir 2>/dev/null || true)"
     if [[ -n "$npm_prefix" ]]; then
@@ -2893,7 +2962,7 @@ is_gateway_daemon_loaded() {
     fi
 
     local status_json=""
-    status_json="$("$claw" daemon status --json 2>/dev/null || true)"
+    status_json="$(bounded_probe_output "openclaw daemon status --json" "$claw" daemon status --json || true)"
     if [[ -z "$status_json" ]]; then
         return 1
     fi
@@ -3042,12 +3111,11 @@ main() {
 
     ui_stage "Preparing environment"
 
-    # Step 1: Homebrew (macOS only)
-    install_homebrew
-
-    # Step 2: Node.js
+    # Step 1: Node.js. macOS package-manager branches install Homebrew lazily
+    # only when they are about to call brew.
     load_nvm_for_node_detection
     if ! check_node; then
+        install_homebrew
         install_node
     fi
     activate_supported_node_on_path || true

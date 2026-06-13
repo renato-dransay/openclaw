@@ -1,10 +1,11 @@
+// Nostr plugin module implements channel behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import {
   createScopedDmSecurityResolver,
   createTopLevelChannelConfigAdapter,
 } from "openclaw/plugin-sdk/channel-config-helpers";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/channel-core";
-import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
+import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-outbound";
 import {
   buildPassiveChannelStatusSummary,
   buildTrafficStatusSummary,

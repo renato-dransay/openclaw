@@ -1,3 +1,4 @@
+// Main update implementation for source checkouts, package installs, finalization, and restart handoff.
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -5,6 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
 import { confirm, isCancel } from "@clack/prompts";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { stylePromptMessage } from "../../../packages/terminal-core/src/prompt-style.js";
+import { theme } from "../../../packages/terminal-core/src/theme.js";
 import {
   checkShellCompletionStatus,
   ensureCompletionCacheExists,
@@ -48,6 +53,7 @@ import { createLowDiskSpaceWarning } from "../../infra/disk-space.js";
 import { pathExists } from "../../infra/fs-safe.js";
 import { readJsonIfExists, writeJson } from "../../infra/json-files.js";
 import { runGlobalPackageUpdateSteps } from "../../infra/package-update-steps.js";
+import { parseStrictPositiveInteger } from "../../infra/parse-finite-number.js";
 import { getSelfAndAncestorPidsSync } from "../../infra/restart-stale-pids.js";
 import { nodeVersionSatisfiesEngine } from "../../infra/runtime-guard.js";
 import {
@@ -83,12 +89,15 @@ import { runGatewayUpdate, type UpdateRunResult } from "../../infra/update-runne
 import { normalizePluginsConfig, resolveEffectiveEnableState } from "../../plugins/config-state.js";
 import {
   loadInstalledPluginIndexInstallRecords,
+  writePersistedInstalledPluginIndexInstallRecords,
   withoutPluginInstallRecords,
   withPluginInstallRecords,
 } from "../../plugins/installed-plugin-index-records.js";
 import {
   resolveTrustedSourceLinkedOfficialClawHubSpec,
   resolveTrustedSourceLinkedOfficialNpmSpec,
+} from "../../plugins/official-external-install-records.js";
+import {
   syncPluginsForUpdateChannel,
   updateNpmInstalledPlugins,
   type PluginUpdateIntegrityDriftParams,
@@ -96,10 +105,6 @@ import {
 } from "../../plugins/update.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import { defaultRuntime } from "../../runtime.js";
-import { isRecord } from "../../shared/record-coerce.js";
-import { normalizeOptionalString } from "../../shared/string-coerce.js";
-import { stylePromptMessage } from "../../terminal/prompt-style.js";
-import { theme } from "../../terminal/theme.js";
 import { resolveUserPath } from "../../utils.js";
 import { VERSION } from "../../version.js";
 import { replaceCliName, resolveCliName } from "../cli-name.js";
@@ -165,7 +170,8 @@ const POST_INSTALL_DOCTOR_SERVICE_ENV_KEYS = [
   ...SERVICE_REFRESH_PATH_ENV_KEYS,
   "OPENCLAW_PROFILE",
 ] as const;
-const POST_UPDATE_PLUGIN_REPAIR_GUIDANCE = "Run openclaw doctor --fix to attempt automatic repair.";
+const POST_UPDATE_PLUGIN_REPAIR_GUIDANCE =
+  "Run openclaw update repair to retry post-update plugin repair.";
 const JSON_MODE_SERVICE_STDOUT = new Writable({
   write(_chunk, _encoding, callback) {
     callback();
@@ -260,7 +266,7 @@ function normalizeChannelConfigMap(value: unknown): Record<string, unknown> | nu
 
 function normalizeDirectAuthoredChannelConfigMap(value: unknown): Record<string, unknown> | null {
   const channels = normalizeChannelConfigMap(value);
-  if (!channels || Object.prototype.hasOwnProperty.call(channels, "$include")) {
+  if (!channels || Object.hasOwn(channels, "$include")) {
     return null;
   }
   return channels;
@@ -556,6 +562,20 @@ function createGuidedPostUpdatePluginOutcome(outcome: PluginUpdateOutcome): {
   };
 }
 
+function collectPluginChannelFallbackMessages(outcomes: readonly PluginUpdateOutcome[]): string[] {
+  const seen = new Set<string>();
+  const messages: string[] = [];
+  for (const outcome of outcomes) {
+    const message = outcome.channelFallback?.message;
+    if (!message || seen.has(message)) {
+      continue;
+    }
+    seen.add(message);
+    messages.push(message);
+  }
+  return messages;
+}
+
 function isDisabledAfterFailureOutcome(outcome: PluginUpdateOutcome): boolean {
   return outcome.status === "skipped" && outcome.message.includes("after plugin update failure");
 }
@@ -577,7 +597,7 @@ export function buildInvalidConfigPostCoreUpdateResult(): {
 } {
   const guidance = [
     "Run `openclaw doctor` to inspect the config validation errors.",
-    "Once the config parses, rerun `openclaw update`.",
+    "Once the config parses, rerun `openclaw update repair`.",
   ];
   const message =
     "Plugin post-update convergence skipped because the config is invalid; refusing to restart the gateway with an unverified plugin set.";
@@ -609,9 +629,17 @@ export function shouldPrepareUpdatedInstallRestart(params: {
   updateMode: UpdateRunResult["mode"];
   serviceInstalled: boolean;
   serviceLoaded: boolean;
+  serviceStoppedForUpdate?: boolean;
+  serviceMatchesUpdateRoot?: boolean;
 }): boolean {
   if (isPackageManagerUpdateMode(params.updateMode)) {
     return params.serviceInstalled;
+  }
+  if (params.updateMode === "git" && params.serviceStoppedForUpdate) {
+    return params.serviceInstalled;
+  }
+  if (params.updateMode === "git") {
+    return params.serviceLoaded && params.serviceMatchesUpdateRoot === true;
   }
   return params.serviceLoaded;
 }
@@ -749,7 +777,7 @@ export function formatPostUpdateGatewayRecoveryInstructions(
   return lines;
 }
 
-type PrePackageServiceStop = {
+type PreManagedServiceStop = {
   stopped: boolean;
   inspected: boolean;
   runtimeInspected: boolean;
@@ -757,6 +785,13 @@ type PrePackageServiceStop = {
   blockMessage?: string;
   serviceEnv?: NodeJS.ProcessEnv;
 };
+
+class UpdateCommandAbort extends Error {
+  constructor() {
+    super("openclaw-update-abort");
+    this.name = "UpdateCommandAbort";
+  }
+}
 
 type ManagedServiceRootRedirect = {
   root: string;
@@ -781,8 +816,7 @@ function parsePositivePid(value: unknown): number | null {
   if (!/^\d+$/u.test(trimmed)) {
     return null;
   }
-  const parsed = Number.parseInt(trimmed, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  return parseStrictPositiveInteger(trimmed) ?? null;
 }
 
 function isInheritedGatewayRuntimePid(
@@ -810,20 +844,16 @@ function gatewayAncestryBlockMessage(pid: unknown): string | undefined {
   return isGatewayAncestorPid(pid) ? formatGatewayAncestryBlockMessage(pid) : undefined;
 }
 
-function gatewayRuntimeAncestryBlockMessage(
-  runtime: { pid?: unknown } | null | undefined,
-): string | undefined {
-  return gatewayAncestryBlockMessage(runtime?.pid);
-}
-
 function serviceControlStdoutForMode(jsonMode: boolean): NodeJS.WritableStream {
   return jsonMode ? JSON_MODE_SERVICE_STDOUT : process.stdout;
 }
 
-async function maybeStopManagedServiceBeforePackageUpdate(params: {
+async function maybeStopManagedServiceBeforeMutableUpdate(params: {
+  updateInstallKind: "git" | "package";
+  root: string;
   shouldRestart: boolean;
   jsonMode: boolean;
-}): Promise<PrePackageServiceStop> {
+}): Promise<PreManagedServiceStop> {
   let service: ReturnType<typeof resolveGatewayService>;
   let serviceState: Awaited<ReturnType<typeof readGatewayServiceState>>;
   try {
@@ -849,7 +879,7 @@ async function maybeStopManagedServiceBeforePackageUpdate(params: {
     if (!params.jsonMode && serviceState.running) {
       defaultRuntime.log(
         theme.warn(
-          "--no-restart is set while the managed gateway service is running; the package update will not stop or restart that process.",
+          `--no-restart is set while the managed gateway service is running; the ${params.updateInstallKind} update will not stop or restart that process.`,
         ),
       );
     }
@@ -882,7 +912,7 @@ async function maybeStopManagedServiceBeforePackageUpdate(params: {
     };
   }
 
-  const blockMessage = gatewayRuntimeAncestryBlockMessage(serviceState.runtime);
+  const blockMessage = gatewayAncestryBlockMessage(serviceState.runtime?.pid);
   if (blockMessage) {
     return {
       stopped: false,
@@ -894,8 +924,31 @@ async function maybeStopManagedServiceBeforePackageUpdate(params: {
     };
   }
 
+  if (
+    params.updateInstallKind === "git" &&
+    (await gatewayServiceCommandUsesRoot({ root: params.root, command: serviceState.command })) ===
+      false
+  ) {
+    if (!params.jsonMode) {
+      defaultRuntime.log(
+        theme.muted(
+          "Managed gateway service points at a different OpenClaw root; leaving it running during this git update.",
+        ),
+      );
+    }
+    return {
+      stopped: false,
+      inspected: true,
+      runtimeInspected: true,
+      running: true,
+      serviceEnv: serviceState.env,
+    };
+  }
+
   if (!params.jsonMode) {
-    defaultRuntime.log(theme.muted("Stopping managed gateway service before package update..."));
+    defaultRuntime.log(
+      theme.muted(`Stopping managed gateway service before ${params.updateInstallKind} update...`),
+    );
   }
   await service.stop({
     env: serviceState.env,
@@ -910,16 +963,16 @@ async function maybeStopManagedServiceBeforePackageUpdate(params: {
   };
 }
 
-async function maybeRestartServiceAfterFailedPackageUpdate(params: {
-  prePackageServiceStop: PrePackageServiceStop | undefined;
+async function maybeRestartServiceAfterFailedMutableUpdate(params: {
+  preManagedServiceStop: PreManagedServiceStop | undefined;
   jsonMode: boolean;
 }): Promise<void> {
-  if (!params.prePackageServiceStop?.stopped || !params.prePackageServiceStop.serviceEnv) {
+  if (!params.preManagedServiceStop?.stopped || !params.preManagedServiceStop.serviceEnv) {
     return;
   }
   try {
     await resolveGatewayService().restart({
-      env: params.prePackageServiceStop.serviceEnv,
+      env: params.preManagedServiceStop.serviceEnv,
       stdout: serviceControlStdoutForMode(params.jsonMode),
     });
     if (!params.jsonMode) {
@@ -945,13 +998,13 @@ function isRunningInsideGatewayService(
   return !serviceKind || serviceKind === GATEWAY_SERVICE_KIND;
 }
 
-function shouldBlockPackageUpdateFromGatewayServiceEnv(params: {
-  prePackageServiceStop: PrePackageServiceStop | undefined;
+function shouldBlockMutableUpdateFromGatewayServiceEnv(params: {
+  preManagedServiceStop: PreManagedServiceStop | undefined;
 }): boolean {
   if (!isRunningInsideGatewayService()) {
     return false;
   }
-  const stopState = params.prePackageServiceStop;
+  const stopState = params.preManagedServiceStop;
   if (!stopState?.inspected) {
     return true;
   }
@@ -1114,10 +1167,16 @@ export function resolveUpdatedGatewayRestartPort(params: {
 export function resolvePostUpdateServiceStateReadEnv(params: {
   updateMode: UpdateRunResult["mode"];
   processEnv?: NodeJS.ProcessEnv;
+  preManagedServiceEnv?: NodeJS.ProcessEnv;
   prePackageServiceEnv?: NodeJS.ProcessEnv;
 }): NodeJS.ProcessEnv {
-  if (isPackageManagerUpdateMode(params.updateMode) && params.prePackageServiceEnv) {
-    return params.prePackageServiceEnv;
+  if (params.updateMode === "git" && params.preManagedServiceEnv) {
+    return params.preManagedServiceEnv;
+  }
+  if (isPackageManagerUpdateMode(params.updateMode)) {
+    return (
+      params.preManagedServiceEnv ?? params.prePackageServiceEnv ?? params.processEnv ?? process.env
+    );
   }
   return params.processEnv ?? process.env;
 }
@@ -1268,7 +1327,7 @@ async function tryInstallShellCompletion(opts: {
     defaultRuntime.log(theme.muted("Upgrading shell completion to cached version..."));
     const cacheGenerated = await ensureCompletionCacheExists(CLI_NAME);
     if (cacheGenerated) {
-      await installCompletion(status.shell, true, CLI_NAME);
+      await installShellCompletionForUpdate(status.shell, true);
     }
     return;
   }
@@ -1305,7 +1364,16 @@ async function tryInstallShellCompletion(opts: {
       return;
     }
 
-    await installCompletion(status.shell, opts.skipPrompt, CLI_NAME);
+    await installShellCompletionForUpdate(status.shell, opts.skipPrompt);
+  }
+}
+
+async function installShellCompletionForUpdate(shell: string, yes: boolean): Promise<void> {
+  try {
+    await installCompletion(shell, yes, CLI_NAME);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    defaultRuntime.log(theme.warn(`Shell completion refresh failed: ${message}`));
   }
 }
 
@@ -1386,6 +1454,33 @@ async function resolveManagedServicePackageUpdateRoot(params: {
     previousRoot: params.root,
     ...(nodeRunner ? { nodeRunner } : {}),
   };
+}
+
+async function gatewayServiceCommandUsesRoot(params: {
+  root: string | undefined;
+  env?: NodeJS.ProcessEnv;
+  command?: GatewayServiceCommandConfig | null;
+}): Promise<boolean | null> {
+  const expectedRoot = normalizeOptionalString(params.root);
+  if (!expectedRoot) {
+    return null;
+  }
+  const command =
+    params.command === undefined
+      ? await resolveGatewayService()
+          .readCommand(params.env ?? process.env)
+          .catch(() => null)
+      : params.command;
+  const layout = await summarizeGatewayServiceLayout(command);
+  const serviceRoot = layout?.packageRoot;
+  if (!serviceRoot) {
+    return null;
+  }
+  const [expectedRootReal, serviceRootReal] = await Promise.all([
+    tryRealpathOrResolve(expectedRoot),
+    tryRealpathOrResolve(serviceRoot),
+  ]);
+  return expectedRootReal === serviceRootReal;
 }
 
 async function runPackageInstallUpdate(params: {
@@ -1518,6 +1613,7 @@ async function runGitUpdate(params: {
   opts: UpdateCommandOptions;
   stop: () => void;
   devTargetRef?: string;
+  beforeGitMutation?: () => Promise<void>;
 }): Promise<UpdateRunResult> {
   const updateRoot = params.switchToGit ? resolveGitInstallDir() : params.root;
   const effectiveTimeout = params.timeoutMs ?? DEFAULT_UPDATE_STEP_TIMEOUT_MS;
@@ -1556,6 +1652,7 @@ async function runGitUpdate(params: {
     tag: params.tag,
     devTargetRef: params.devTargetRef,
     deferConfiguredPluginInstallRepair: true,
+    beforeGitMutation: params.beforeGitMutation,
   });
   const steps = [...(cloneStep ? [cloneStep] : []), ...updateResult.steps];
 
@@ -1843,6 +1940,7 @@ export async function updatePluginsAfterCoreUpdate(params: {
       reason: "source-changed",
       workspaceDir: params.root,
       installRecords: nextInstallRecords,
+      invalidateRuntimeCache: false,
       logger: pluginLogger,
     });
   }
@@ -1911,6 +2009,10 @@ export async function updatePluginsAfterCoreUpdate(params: {
     defaultRuntime.log(theme.muted(`npm plugins: ${parts.join(", ")}.`));
   }
 
+  for (const message of collectPluginChannelFallbackMessages(pluginUpdateOutcomes)) {
+    defaultRuntime.log(theme.warn(message));
+  }
+
   for (const outcome of pluginUpdateOutcomes) {
     if (outcome.status !== "error") {
       continue;
@@ -1947,8 +2049,13 @@ async function maybeRestartService(params: {
   restartScriptPath?: string | null;
   invocationCwd?: string;
   nodeRunner?: string;
+  skipLegacyServiceRestart?: boolean;
+  requireRunningServiceAfterRestart?: boolean;
 }): Promise<boolean> {
-  const verifyRestartedGateway = async (expectedGatewayVersion: string | undefined) => {
+  const verifyRestartedGateway = async (
+    expectedGatewayVersion: string | undefined,
+    opts: { requireRunningService?: boolean } = {},
+  ) => {
     const restartAfterStaleCleanup = async () => {
       if (params.refreshServiceEnv && isPackageManagerUpdateMode(params.result.mode)) {
         await runUpdatedInstallGatewayRestart({
@@ -1970,6 +2077,7 @@ async function maybeRestartService(params: {
       port: params.gatewayPort,
       expectedVersion: expectedGatewayVersion,
       env: params.serviceEnv,
+      requireRunningService: opts.requireRunningService,
     });
     if (!health.healthy && health.staleGatewayPids.length > 0) {
       if (!params.opts.json) {
@@ -1986,6 +2094,7 @@ async function maybeRestartService(params: {
         port: params.gatewayPort,
         expectedVersion: expectedGatewayVersion,
         env: params.serviceEnv,
+        requireRunningService: opts.requireRunningService,
       });
     }
 
@@ -2012,7 +2121,9 @@ async function maybeRestartService(params: {
       }
     }
 
-    if (health.healthy) {
+    const serviceRuntimeHealthy =
+      !opts.requireRunningService || health.runtime.status === "running";
+    if (health.healthy && serviceRuntimeHealthy) {
       if (!params.opts.json) {
         defaultRuntime.log(theme.success("Gateway: restarted and verified."));
       }
@@ -2021,6 +2132,9 @@ async function maybeRestartService(params: {
 
     const diagnosticLines = [
       "Gateway did not become healthy after restart.",
+      ...(health.healthy && opts.requireRunningService
+        ? ["Gateway responded, but the managed service did not report running after restart."]
+        : []),
       ...renderRestartDiagnostics(health),
       ...(launchAgentRecovery?.attempted
         ? [
@@ -2042,7 +2156,7 @@ async function maybeRestartService(params: {
       }
     }
 
-    if (isPackageManagerUpdateMode(params.result.mode)) {
+    if (isPackageManagerUpdateMode(params.result.mode) || opts.requireRunningService) {
       return false;
     }
 
@@ -2060,9 +2174,14 @@ async function maybeRestartService(params: {
         ? normalizeOptionalString(params.result.after?.version)
         : undefined;
       const isPackageUpdate = isPackageManagerUpdateMode(params.result.mode);
+      const canVerifyUpdatedGatewayByVersion =
+        expectedGatewayVersion !== undefined &&
+        expectedGatewayVersion !== normalizeOptionalString(params.result.before?.version);
       let restarted = false;
       let restartInitiated = false;
       let refreshedGatewayAlreadyHealthy = false;
+      let updatedInstallRestartNeedsServiceRootProof = false;
+      let restartScriptPath = params.restartScriptPath;
       if (params.refreshServiceEnv) {
         try {
           await refreshGatewayServiceEnv({
@@ -2072,6 +2191,24 @@ async function maybeRestartService(params: {
             env: params.serviceEnv,
             nodeRunner: params.nodeRunner,
           });
+          if (isPackageUpdate && expectedGatewayVersion) {
+            const health = await waitForGatewayHealthyRestart({
+              service: resolveGatewayService(),
+              port: params.gatewayPort,
+              expectedVersion: expectedGatewayVersion,
+              env: params.serviceEnv,
+              attempts: POST_REFRESH_ALREADY_HEALTHY_ATTEMPTS,
+              delayMs: POST_REFRESH_ALREADY_HEALTHY_DELAY_MS,
+            });
+            refreshedGatewayAlreadyHealthy = health.healthy;
+            if (refreshedGatewayAlreadyHealthy && !params.opts.json) {
+              defaultRuntime.log(
+                theme.muted(
+                  "Gateway already reports the updated version after service refresh; skipped redundant restart.",
+                ),
+              );
+            }
+          }
         } catch (err) {
           // Always log the refresh failure so callers can detect it (issue #56772).
           // Previously this was silently suppressed in --json mode, hiding the root
@@ -2083,34 +2220,17 @@ async function maybeRestartService(params: {
             defaultRuntime.log(theme.warn(message));
           }
           if (isPackageUpdate) {
-            return false;
-          }
-        }
-        if (isPackageUpdate && expectedGatewayVersion) {
-          const health = await waitForGatewayHealthyRestart({
-            service: resolveGatewayService(),
-            port: params.gatewayPort,
-            expectedVersion: expectedGatewayVersion,
-            env: params.serviceEnv,
-            attempts: POST_REFRESH_ALREADY_HEALTHY_ATTEMPTS,
-            delayMs: POST_REFRESH_ALREADY_HEALTHY_DELAY_MS,
-          });
-          refreshedGatewayAlreadyHealthy = health.healthy;
-          if (refreshedGatewayAlreadyHealthy && !params.opts.json) {
-            defaultRuntime.log(
-              theme.muted(
-                "Gateway already reports the updated version after service refresh; skipped redundant restart.",
-              ),
-            );
+            restartScriptPath = null;
+            updatedInstallRestartNeedsServiceRootProof = !canVerifyUpdatedGatewayByVersion;
           }
         }
       }
       // Service refresh can bootstrap a RunAtLoad LaunchAgent directly. When
       // that already produced the expected gateway version, a second kickstart
       // would only race the healthy supervisor-owned process.
-      if (!refreshedGatewayAlreadyHealthy && params.restartScriptPath) {
+      if (!refreshedGatewayAlreadyHealthy && restartScriptPath) {
         await createUpdateConfigSnapshot();
-        await runRestartScript(params.restartScriptPath);
+        await runRestartScript(restartScriptPath);
         restartInitiated = true;
       } else if (!refreshedGatewayAlreadyHealthy && params.refreshServiceEnv && isPackageUpdate) {
         await createUpdateConfigSnapshot();
@@ -2121,9 +2241,24 @@ async function maybeRestartService(params: {
           env: params.serviceEnv,
           nodeRunner: params.nodeRunner,
         });
+        if (
+          updatedInstallRestartNeedsServiceRootProof &&
+          (await gatewayServiceCommandUsesRoot({
+            root: params.result.root,
+            env: params.serviceEnv,
+          })) !== true
+        ) {
+          if (!params.opts.json) {
+            defaultRuntime.log(
+              theme.warn("Gateway service did not point at the updated install after restart."),
+            );
+          }
+          return false;
+        }
       } else if (
         !refreshedGatewayAlreadyHealthy &&
-        shouldUseLegacyProcessRestartAfterUpdate({ updateMode: params.result.mode })
+        shouldUseLegacyProcessRestartAfterUpdate({ updateMode: params.result.mode }) &&
+        !params.skipLegacyServiceRestart
       ) {
         await createUpdateConfigSnapshot();
         restarted = await runDaemonRestart();
@@ -2136,7 +2271,11 @@ async function maybeRestartService(params: {
         restartInitiated ||
         (restarted && expectedGatewayVersion !== undefined);
       if (shouldVerifyRestart) {
-        const restartHealthy = await verifyRestartedGateway(expectedGatewayVersion);
+        const requireRunningService =
+          updatedInstallRestartNeedsServiceRootProof || params.requireRunningServiceAfterRestart;
+        const restartHealthy = await verifyRestartedGateway(expectedGatewayVersion, {
+          requireRunningService,
+        });
         if (!restartHealthy) {
           if (!params.opts.json) {
             defaultRuntime.log("");
@@ -2177,7 +2316,10 @@ async function maybeRestartService(params: {
           ),
         );
       }
-      if (isPackageManagerUpdateMode(params.result.mode)) {
+      if (
+        isPackageManagerUpdateMode(params.result.mode) ||
+        params.requireRunningServiceAfterRestart
+      ) {
         return false;
       }
     }
@@ -2589,8 +2731,8 @@ async function readProcessStartTimeMs(pid: number): Promise<number | undefined> 
 async function resolvePostCoreUpdateStartedAtMs(
   env: NodeJS.ProcessEnv,
 ): Promise<number | undefined> {
-  const fromEnv = Number.parseInt(env[POST_CORE_UPDATE_STARTED_AT_ENV] ?? "", 10);
-  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+  const fromEnv = parseStrictPositiveInteger(env[POST_CORE_UPDATE_STARTED_AT_ENV] ?? "");
+  if (fromEnv !== undefined) {
     return fromEnv;
   }
   return await readProcessStartTimeMs(process.ppid);
@@ -2705,6 +2847,35 @@ export function resolvePostCoreUpdateChildStdio(
   return platform === "win32" ? "pipe" : "inherit";
 }
 
+function preparePostCorePluginInstallRecordsForFreshProcess(params: {
+  records: Record<string, PluginInstallRecord>;
+  targetVersion: string | null;
+}): Record<string, PluginInstallRecord> {
+  if (!params.targetVersion) {
+    return params.records;
+  }
+  const runtimeComparison = compareSemverStrings(VERSION, params.targetVersion);
+  if (runtimeComparison === null || runtimeComparison <= 0) {
+    return params.records;
+  }
+  let changed = false;
+  const next: Record<string, PluginInstallRecord> = {};
+  for (const [pluginId, record] of Object.entries(params.records)) {
+    const installedVersion = record.resolvedVersion ?? record.version;
+    const comparison = installedVersion
+      ? compareSemverStrings(installedVersion, params.targetVersion)
+      : null;
+    if (record.source !== "npm" || comparison === null || comparison <= 0) {
+      next[pluginId] = record;
+      continue;
+    }
+    const { resolvedSpec: _resolvedSpec, resolvedVersion: _resolvedVersion, ...rest } = record;
+    next[pluginId] = rest;
+    changed = true;
+  }
+  return changed ? next : params.records;
+}
+
 async function continuePostCoreUpdateInFreshProcess(params: {
   root: string;
   channel: "stable" | "beta" | "dev";
@@ -2739,8 +2910,16 @@ async function continuePostCoreUpdateInFreshProcess(params: {
   const sourceConfigPath = path.join(resultDir, "source-config.json");
   const postCoreHostVersion = await readPackageVersion(params.root);
 
+  const pluginInstallRecords = preparePostCorePluginInstallRecordsForFreshProcess({
+    records: params.pluginInstallRecords,
+    targetVersion: postCoreHostVersion,
+  });
+
   try {
-    await writePostCorePluginInstallRecordsFile(installRecordsPath, params.pluginInstallRecords);
+    if (pluginInstallRecords && pluginInstallRecords !== params.pluginInstallRecords) {
+      await writePersistedInstalledPluginIndexInstallRecords(pluginInstallRecords);
+    }
+    await writePostCorePluginInstallRecordsFile(installRecordsPath, pluginInstallRecords);
     await writePostCoreSourceConfigFile(sourceConfigPath, params.preUpdateConfig);
     const childStdio = resolvePostCoreUpdateChildStdio();
     const child = spawn(params.nodeRunner ?? resolveNodeRunner(), argv, {
@@ -3296,38 +3475,72 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
   const startedAt = Date.now();
   const preUpdatePluginInstallRecords = await loadInstalledPluginIndexInstallRecords();
 
-  let prePackageServiceStop: PrePackageServiceStop | undefined;
-  if (updateInstallKind === "package") {
+  let preManagedServiceStop: PreManagedServiceStop | undefined;
+  const gitMutationRoots =
+    updateInstallKind === "git" ? (switchToGit ? [root, resolveGitInstallDir()] : [root]) : null;
+  const stopManagedServiceBeforeMutableUpdate = async (
+    mutationRoots: readonly string[] = [root],
+  ) => {
+    if (updateInstallKind !== "package" && updateInstallKind !== "git") {
+      return;
+    }
     try {
-      prePackageServiceStop = await maybeStopManagedServiceBeforePackageUpdate({
-        shouldRestart,
-        jsonMode: Boolean(opts.json),
-      });
+      const uniqueMutationRoots = Array.from(new Set(mutationRoots));
+      for (const mutationRoot of uniqueMutationRoots) {
+        preManagedServiceStop = await maybeStopManagedServiceBeforeMutableUpdate({
+          updateInstallKind,
+          root: mutationRoot,
+          shouldRestart,
+          jsonMode: Boolean(opts.json),
+        });
+        if (
+          preManagedServiceStop.stopped ||
+          preManagedServiceStop.blockMessage ||
+          shouldBlockMutableUpdateFromGatewayServiceEnv({ preManagedServiceStop }) ||
+          !preManagedServiceStop.inspected ||
+          !preManagedServiceStop.running ||
+          !shouldRestart
+        ) {
+          break;
+        }
+      }
     } catch (err) {
       stop();
       defaultRuntime.error(`Failed to stop managed gateway service before update: ${String(err)}`);
       defaultRuntime.exit(1);
-      return;
+      throw new UpdateCommandAbort();
     }
 
-    if (prePackageServiceStop?.blockMessage) {
+    if (preManagedServiceStop?.blockMessage) {
       stop();
-      defaultRuntime.error(prePackageServiceStop.blockMessage);
+      defaultRuntime.error(preManagedServiceStop.blockMessage);
       defaultRuntime.exit(1);
-      return;
+      throw new UpdateCommandAbort();
     }
 
-    if (shouldBlockPackageUpdateFromGatewayServiceEnv({ prePackageServiceStop })) {
+    if (shouldBlockMutableUpdateFromGatewayServiceEnv({ preManagedServiceStop })) {
       stop();
+      const updateLabel = updateInstallKind === "git" ? "Git updates" : "Package updates";
       defaultRuntime.error(
         [
-          "Package updates cannot run from inside the gateway service process.",
+          `${updateLabel} cannot run from inside the gateway service process.`,
           "That path replaces the active OpenClaw dist tree while the live gateway may still lazy-load old chunks.",
           `Run \`${replaceCliName(formatCliCommand("openclaw update"), CLI_NAME)}\` from a shell outside the gateway service, or stop the gateway service first and then update.`,
         ].join("\n"),
       );
       defaultRuntime.exit(1);
-      return;
+      throw new UpdateCommandAbort();
+    }
+  };
+
+  if (updateInstallKind === "package") {
+    try {
+      await stopManagedServiceBeforeMutableUpdate();
+    } catch (err) {
+      if (err instanceof UpdateCommandAbort) {
+        return;
+      }
+      throw err;
     }
   }
 
@@ -3343,7 +3556,7 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
             startedAt,
             progress,
             jsonMode: Boolean(opts.json),
-            managedServiceEnv: prePackageServiceStop?.serviceEnv,
+            managedServiceEnv: preManagedServiceStop?.serviceEnv,
             invocationCwd,
             honorPackageRoot:
               managedServiceRootRedirect !== null || managedServiceNodeRunner !== undefined,
@@ -3362,11 +3575,18 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
             opts,
             stop,
             devTargetRef,
+            beforeGitMutation:
+              updateInstallKind === "git"
+                ? () => stopManagedServiceBeforeMutableUpdate(gitMutationRoots ?? [root])
+                : undefined,
           });
   } catch (err) {
     stop();
-    await maybeRestartServiceAfterFailedPackageUpdate({
-      prePackageServiceStop,
+    if (err instanceof UpdateCommandAbort) {
+      return;
+    }
+    await maybeRestartServiceAfterFailedMutableUpdate({
+      preManagedServiceStop,
       jsonMode: Boolean(opts.json),
     });
     throw err;
@@ -3383,8 +3603,8 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
       result,
       jsonMode: Boolean(opts.json),
     });
-    await maybeRestartServiceAfterFailedPackageUpdate({
-      prePackageServiceStop,
+    await maybeRestartServiceAfterFailedMutableUpdate({
+      preManagedServiceStop,
       jsonMode: Boolean(opts.json),
     });
     defaultRuntime.exit(1);
@@ -3397,8 +3617,8 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
       result,
       jsonMode: Boolean(opts.json),
     });
-    await maybeRestartServiceAfterFailedPackageUpdate({
-      prePackageServiceStop,
+    await maybeRestartServiceAfterFailedMutableUpdate({
+      preManagedServiceStop,
       jsonMode: Boolean(opts.json),
     });
     if (result.reason === "dirty") {
@@ -3509,16 +3729,40 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
         : undefined,
     );
     postUpdateConfigSnapshot = restoredConfig.snapshot;
-    postCorePluginUpdate = await runPostCorePluginUpdate({
-      root: postUpdateRoot,
-      channel,
-      configSnapshot: postUpdateConfigSnapshot,
-      configChanged: restoredConfig.changed,
-      restoredAuthoredChannels: restoredConfig.authoredChannels,
-      opts,
-      timeoutMs: updateStepTimeoutMs,
-      pluginInstallRecords: preUpdatePluginInstallRecords,
-    });
+    // Current-process post-core convergence still reports the pre-update
+    // VERSION. During downgrades, pin compatibility checks to the installed
+    // target so incompatible newer plugins are disabled before restart.
+    const postUpdateInstalledVersion = await readPackageVersion(postUpdateRoot);
+    const versionComparison =
+      postUpdateInstalledVersion && VERSION
+        ? compareSemverStrings(VERSION, postUpdateInstalledVersion)
+        : null;
+    const compatibilityDowngradeTarget =
+      versionComparison != null && versionComparison > 0 ? postUpdateInstalledVersion : null;
+    const previousCompatibilityHostVersion = process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION;
+    if (compatibilityDowngradeTarget) {
+      process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION = compatibilityDowngradeTarget;
+    }
+    try {
+      postCorePluginUpdate = await runPostCorePluginUpdate({
+        root: postUpdateRoot,
+        channel,
+        configSnapshot: postUpdateConfigSnapshot,
+        configChanged: restoredConfig.changed,
+        restoredAuthoredChannels: restoredConfig.authoredChannels,
+        opts,
+        timeoutMs: updateStepTimeoutMs,
+        pluginInstallRecords: preUpdatePluginInstallRecords,
+      });
+    } finally {
+      if (compatibilityDowngradeTarget) {
+        if (previousCompatibilityHostVersion === undefined) {
+          delete process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION;
+        } else {
+          process.env.OPENCLAW_COMPATIBILITY_HOST_VERSION = previousCompatibilityHostVersion;
+        }
+      }
+    }
   }
 
   const resultWithPostUpdate: UpdateRunResult = postCorePluginUpdate
@@ -3549,8 +3793,9 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
   }
 
   let restartScriptPath: string | null = null;
-  let refreshGatewayServiceEnv = false;
+  let refreshGatewayServiceEnvLocal = false;
   let gatewayServiceEnv: NodeJS.ProcessEnv | undefined;
+  let skipLegacyServiceRestart = false;
   let gatewayPort = resolveUpdatedGatewayRestartPort({
     config: postUpdateConfigSnapshot.valid ? postUpdateConfigSnapshot.config : undefined,
     processEnv: process.env,
@@ -3561,14 +3806,29 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
         env: resolvePostUpdateServiceStateReadEnv({
           updateMode: resultWithPostUpdate.mode,
           processEnv: process.env,
-          prePackageServiceEnv: prePackageServiceStop?.serviceEnv,
+          preManagedServiceEnv: preManagedServiceStop?.serviceEnv,
         }),
       });
+      const serviceMatchesUpdateRoot =
+        resultWithPostUpdate.mode === "git"
+          ? ((await gatewayServiceCommandUsesRoot({
+              root: postUpdateRoot,
+              command: serviceState.command,
+            })) ?? undefined)
+          : undefined;
+      skipLegacyServiceRestart =
+        resultWithPostUpdate.mode === "git" &&
+        serviceState.installed &&
+        serviceState.loaded &&
+        preManagedServiceStop?.stopped !== true &&
+        serviceMatchesUpdateRoot === false;
       if (
         shouldPrepareUpdatedInstallRestart({
           updateMode: resultWithPostUpdate.mode,
           serviceInstalled: serviceState.installed,
           serviceLoaded: serviceState.loaded,
+          serviceStoppedForUpdate: preManagedServiceStop?.stopped,
+          serviceMatchesUpdateRoot,
         })
       ) {
         gatewayServiceEnv = serviceState.env;
@@ -3578,7 +3838,7 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
           serviceEnv: gatewayServiceEnv,
         });
         restartScriptPath = await prepareRestartScript(serviceState.env, gatewayPort);
-        refreshGatewayServiceEnv = true;
+        refreshGatewayServiceEnvLocal = true;
       }
     } catch {
       // Ignore errors during pre-check; fallback to standard restart
@@ -3601,12 +3861,15 @@ async function updateCommandInternal(opts: UpdateCommandOptions): Promise<void> 
     shouldRestart,
     result: resultWithPostUpdate,
     opts,
-    refreshServiceEnv: refreshGatewayServiceEnv,
+    refreshServiceEnv: refreshGatewayServiceEnvLocal,
     serviceEnv: gatewayServiceEnv,
     gatewayPort,
     restartScriptPath,
     invocationCwd,
     nodeRunner: managedServiceNodeRunner,
+    skipLegacyServiceRestart,
+    requireRunningServiceAfterRestart:
+      resultWithPostUpdate.mode === "git" && preManagedServiceStop?.stopped === true,
   });
   if (!restartOk) {
     await markControlPlaneUpdateRestartSentinelFailureBestEffort({

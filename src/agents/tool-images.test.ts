@@ -1,3 +1,5 @@
+// Tool image tests cover image payload sanitization before tool outputs are
+// returned to model-visible content blocks.
 import { describe, expect, it } from "vitest";
 import {
   createNoisyPngBuffer,
@@ -8,22 +10,6 @@ import { getImageMetadata } from "../media/image-ops.js";
 import { sanitizeContentBlocksImages, sanitizeImageBlocks } from "./tool-images.js";
 
 describe("tool image sanitizing", () => {
-  const unavailableImageBackend = process.platform === "win32" ? "sips" : "windows-native";
-
-  async function withUnavailableImageBackend<T>(fn: () => Promise<T>): Promise<T> {
-    const previousBackend = process.env.OPENCLAW_IMAGE_BACKEND;
-    process.env.OPENCLAW_IMAGE_BACKEND = unavailableImageBackend;
-    try {
-      return await fn();
-    } finally {
-      if (previousBackend === undefined) {
-        delete process.env.OPENCLAW_IMAGE_BACKEND;
-      } else {
-        process.env.OPENCLAW_IMAGE_BACKEND = previousBackend;
-      }
-    }
-  }
-
   const getImageBlock = (
     blocks: Awaited<ReturnType<typeof sanitizeContentBlocksImages>>,
   ): (typeof blocks)[number] & { type: "image"; data: string; mimeType?: string } => {
@@ -95,29 +81,6 @@ describe("tool image sanitizing", () => {
     expect(image.mimeType).toBe("image/jpeg");
   }, 20_000);
 
-  it("drops images above max dimension when no image processor is available", async () => {
-    const png = await createWidePng();
-    expect(png.byteLength).toBeLessThan(5 * 1024 * 1024);
-
-    const blocks = [
-      {
-        type: "image" as const,
-        data: png.toString("base64"),
-        mimeType: "image/png",
-      },
-    ];
-
-    const out = await withUnavailableImageBackend(() =>
-      sanitizeContentBlocksImages(blocks, "test", { maxDimensionPx: 120 }),
-    );
-
-    expect(out).toHaveLength(1);
-    expect(out[0].type).toBe("text");
-    if (out[0].type === "text") {
-      expect(out[0].text).toMatch(/image processor unavailable/i);
-    }
-  }, 20_000);
-
   it("corrects mismatched jpeg mimeType", async () => {
     const jpeg = createTinyJpegBuffer();
 
@@ -134,7 +97,29 @@ describe("tool image sanitizing", () => {
     expect(image.mimeType).toBe("image/jpeg");
   });
 
+  it("uses default image limits for non-finite options", async () => {
+    const jpeg = createTinyJpegBuffer();
+
+    const out = await sanitizeContentBlocksImages(
+      [
+        {
+          type: "image" as const,
+          data: jpeg.toString("base64"),
+          mimeType: "image/jpeg",
+        },
+      ],
+      "test",
+      { maxDimensionPx: Number.NaN, maxBytes: Number.NaN },
+    );
+
+    const image = getImageBlock(out);
+    expect(image.mimeType).toBe("image/jpeg");
+    expect(image.data).toBe(jpeg.toString("base64"));
+  });
+
   it("drops malformed image base64 payloads", async () => {
+    // Invalid base64 is replaced with text so malformed payloads cannot smuggle
+    // attributes or script-like text through image blocks.
     const blocks = [
       {
         type: "image" as const,

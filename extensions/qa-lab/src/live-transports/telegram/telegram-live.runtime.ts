@@ -1,3 +1,4 @@
+// Qa Lab plugin module implements telegram live behavior.
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
@@ -5,10 +6,15 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import {
+  parseStrictPositiveInteger,
+  resolveTimerTimeoutMs,
+} from "openclaw/plugin-sdk/number-runtime";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import { isRecord, uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 import { z } from "zod";
+import { QA_EVIDENCE_FILENAME, buildLiveTransportEvidenceSummary } from "../../evidence-summary.js";
 import { startQaGatewayChild } from "../../gateway-child.js";
 import { DEFAULT_QA_LIVE_PROVIDER_MODE } from "../../providers/index.js";
 import {
@@ -20,10 +26,13 @@ import {
 import {
   acquireQaCredentialLease,
   startQaCredentialLeaseHeartbeat,
-  type QaCredentialRole,
 } from "../shared/credential-lease.runtime.js";
+import {
+  appendQaLiveLaneIssue as appendLiveLaneIssue,
+  buildQaLiveLaneArtifactsError as buildLiveLaneArtifactsError,
+  redactQaLiveLaneIssues,
+} from "../shared/live-artifacts.js";
 import { startQaLiveLaneGateway } from "../shared/live-gateway.runtime.js";
-import { appendLiveLaneIssue, buildLiveLaneArtifactsError } from "../shared/live-lane-helpers.js";
 import {
   collectLiveTransportStandardScenarioCoverage,
   selectLiveTransportScenarios,
@@ -53,6 +62,7 @@ type TelegramQaScenarioId =
   | "telegram-other-bot-command-gating"
   | "telegram-context-command"
   | "telegram-current-session-status-tool"
+  | "telegram-tool-only-usage-footer"
   | "telegram-stream-final-single-message"
   | "telegram-long-final-three-chunks"
   | "telegram-long-final-reuses-preview"
@@ -128,6 +138,7 @@ const DEFAULT_TELEGRAM_QA_CANARY_TIMEOUT_MS = 30_000;
 
 type TelegramQaScenarioResult = {
   id: string;
+  standardId?: string;
   title: string;
   status: "pass" | "fail";
   details: string;
@@ -152,26 +163,6 @@ type TelegramQaRunResult = {
   summaryPath: string;
   observedMessagesPath: string;
   gatewayDebugDirPath?: string;
-  scenarios: TelegramQaScenarioResult[];
-};
-
-type TelegramQaSummary = {
-  credentials: {
-    credentialId?: string;
-    kind: string;
-    ownerId?: string;
-    role?: QaCredentialRole;
-    source: "convex" | "env";
-  };
-  groupId: string;
-  startedAt: string;
-  finishedAt: string;
-  cleanupIssues: string[];
-  counts: {
-    total: number;
-    passed: number;
-    failed: number;
-  };
   scenarios: TelegramQaScenarioResult[];
 };
 
@@ -389,6 +380,37 @@ const TELEGRAM_QA_SCENARIOS: TelegramQaScenarioDefinition[] = [
       }),
   },
   {
+    id: "telegram-tool-only-usage-footer",
+    title: "Telegram tool-only reply includes usage footer",
+    defaultEnabled: false,
+    rationale:
+      "Opt-in real Telegram proof that /usage tokens decorates message-tool-only visible replies.",
+    regressionRefs: ["openclaw/openclaw#87392"],
+    timeoutMs: 90_000,
+    buildRun: (sutUsername) => {
+      const marker = `QA-TELEGRAM-USAGE-FOOTER-${randomUUID().slice(0, 8).toUpperCase()}`;
+      return {
+        steps: [
+          {
+            expectReply: true,
+            input: `/usage@${sutUsername} tokens`,
+            expectedTextIncludes: ["Usage", "tokens"],
+          },
+          {
+            allowAnySutReply: true,
+            expectReply: true,
+            input: `@${sutUsername} Telegram usage footer QA. Reply exactly: ${marker}`,
+            expectedTextIncludes: [marker, "Usage:"],
+            expectedJoinedSutTextIncludes: [marker, "Usage:"],
+            expectedSutMessageCount: 2,
+            replyToLatestSutMessage: true,
+            settleMs: 4_000,
+          },
+        ],
+      };
+    },
+  },
+  {
     id: "telegram-mentioned-message-reply",
     title: "Telegram mentioned message gets a reply",
     rationale: "Bot-to-bot group mention routing must produce a threaded SUT reply.",
@@ -566,11 +588,11 @@ function parsePositiveTelegramQaEnvMs(env: NodeJS.ProcessEnv, name: string, fall
   if (raw === undefined) {
     return fallbackMs;
   }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 1) {
+  const parsed = parseStrictPositiveInteger(raw);
+  if (parsed === undefined) {
     return fallbackMs;
   }
-  return Math.floor(parsed);
+  return parsed;
 }
 
 function resolveTelegramQaCanaryTimeoutMs(env: NodeJS.ProcessEnv = process.env) {
@@ -720,7 +742,7 @@ function buildTelegramQaConfig(
           ...baseCfg.agents?.defaults?.models,
           "openai/gpt-5.5": {
             ...baseCfg.agents?.defaults?.models?.["openai/gpt-5.5"],
-            agentRuntime: { id: "pi" },
+            agentRuntime: { id: "openclaw" },
           },
         },
         skipBootstrap: true,
@@ -769,6 +791,7 @@ async function callTelegramApi<T>(
   body?: Record<string, unknown>,
   timeoutMs = 15_000,
 ): Promise<T> {
+  const requestTimeoutMs = resolveTimerTimeoutMs(timeoutMs, 15_000);
   const { response, release } = await fetchWithSsrFGuard({
     url: `https://api.telegram.org/bot${token}/${method}`,
     init: {
@@ -778,7 +801,7 @@ async function callTelegramApi<T>(
       },
       body: JSON.stringify(body ?? {}),
     },
-    signal: AbortSignal.timeout(timeoutMs),
+    timeoutMs: requestTimeoutMs,
     policy: { hostnameAllowlist: ["api.telegram.org"] },
     auditContext: "qa-lab-telegram-live",
   });
@@ -801,6 +824,7 @@ function isRecoverableTelegramQaPollError(error: unknown): boolean {
     message.includes("fetch failed") ||
     message.includes("aborted due to timeout") ||
     message.includes("operation was aborted") ||
+    message.includes("request timed out") ||
     message.includes("aborterror") ||
     message.includes("econnreset") ||
     message.includes("etimedout") ||
@@ -857,7 +881,9 @@ async function sendGroupMessage(
 }
 
 async function waitForTelegramPollRetryDelay(remainingMs: number) {
-  await new Promise((resolve) => setTimeout(resolve, Math.min(250, Math.max(100, remainingMs))));
+  await new Promise((resolve) => {
+    setTimeout(resolve, Math.min(250, Math.max(100, remainingMs)));
+  });
 }
 
 async function waitForObservedMessage(params: {
@@ -1079,7 +1105,9 @@ async function waitForTelegramChannelRunning(
     } catch {
       // retry
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 500);
+    });
   }
   throw new Error(`telegram account "${accountId}" did not become ready`);
 }
@@ -1738,6 +1766,7 @@ export async function runTelegramQaLive(params: {
         latestSutMessageId = canaryTiming.responseMessageId;
         scenarioResults.push({
           id: "telegram-canary",
+          standardId: "canary",
           title: "Telegram canary",
           status: "pass",
           details: redactPublicMetadata
@@ -1768,6 +1797,7 @@ export async function runTelegramQaLive(params: {
         });
         scenarioResults.push({
           id: "telegram-canary",
+          standardId: "canary",
           title: "Telegram canary",
           status: "fail",
           details: canaryFailure,
@@ -1863,6 +1893,7 @@ export async function runTelegramQaLive(params: {
             if (!lastMatched || !firstRequestStartedAt || lastSentMessageId === undefined) {
               const result = {
                 id: scenario.id,
+                standardId: scenario.standardId,
                 title: scenario.title,
                 status: "pass",
                 details: "no reply",
@@ -1886,6 +1917,7 @@ export async function runTelegramQaLive(params: {
                 : `; ${scenarioSteps.filter((step) => step.expectReply).length} command replies matched`;
             const result = {
               id: scenario.id,
+              standardId: scenario.standardId,
               title: scenario.title,
               status: "pass",
               details: redactPublicMetadata
@@ -1911,6 +1943,7 @@ export async function runTelegramQaLive(params: {
           } catch (error) {
             const result = {
               id: scenario.id,
+              standardId: scenario.standardId,
               title: scenario.title,
               status: "fail",
               details: formatErrorMessage(error),
@@ -1948,7 +1981,7 @@ export async function runTelegramQaLive(params: {
 
   const finishedAt = new Date().toISOString();
   const publishedCleanupIssues = redactPublicMetadata
-    ? cleanupIssues.map(() => "details redacted (OPENCLAW_QA_REDACT_PUBLIC_METADATA=1)")
+    ? redactQaLiveLaneIssues(cleanupIssues)
     : cleanupIssues;
   const passedCount = scenarioResults.filter((entry) => entry.status === "pass").length;
   const failedCount = scenarioResults.filter((entry) => entry.status === "fail").length;
@@ -1959,28 +1992,22 @@ export async function runTelegramQaLive(params: {
   if (cleanupIssues.length > 0) {
     writeTelegramQaProgress(progressEnabled, `cleanup issues: count=${cleanupIssues.length}`);
   }
-  const summary: TelegramQaSummary = {
-    credentials: {
-      source: credentialLease.source,
-      kind: credentialLease.kind,
-      role: credentialLease.role,
-      ownerId: redactPublicMetadata ? undefined : credentialLease.ownerId,
-      credentialId: redactPublicMetadata ? undefined : credentialLease.credentialId,
-    },
-    groupId: redactPublicMetadata ? "<redacted>" : runtimeEnv.groupId,
-    startedAt,
-    finishedAt,
-    cleanupIssues: publishedCleanupIssues,
-    counts: {
-      total: scenarioResults.length,
-      passed: passedCount,
-      failed: failedCount,
-    },
-    scenarios: scenarioResults,
-  };
   const reportPath = path.join(outputDir, "telegram-qa-report.md");
-  const summaryPath = path.join(outputDir, "telegram-qa-summary.json");
+  const summaryPath = path.join(outputDir, QA_EVIDENCE_FILENAME);
   const observedMessagesPath = path.join(outputDir, "telegram-qa-observed-messages.json");
+  const evidence = buildLiveTransportEvidenceSummary({
+    artifactPaths: [
+      { kind: "summary", path: path.basename(summaryPath) },
+      { kind: "report", path: path.basename(reportPath) },
+      { kind: "transport-observations", path: path.basename(observedMessagesPath) },
+    ],
+    env: process.env,
+    generatedAt: finishedAt,
+    primaryModel,
+    providerMode,
+    checks: scenarioResults,
+    transportId: "telegram",
+  });
   await fs.writeFile(
     reportPath,
     `${renderTelegramQaMarkdown({
@@ -1995,7 +2022,7 @@ export async function runTelegramQaLive(params: {
     })}\n`,
     { encoding: "utf8", mode: 0o600 },
   );
-  await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, {
+  await fs.writeFile(summaryPath, `${JSON.stringify(evidence, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
   });

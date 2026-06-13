@@ -1,4 +1,5 @@
-import { readdirSync, rmSync } from "node:fs";
+// Telegram plugin module implements bot.create telegram bot harness behavior.
+import { existsSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { buildChannelInboundEventContext } from "openclaw/plugin-sdk/channel-inbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
@@ -8,7 +9,7 @@ import { beforeEach, vi } from "vitest";
 import type { TelegramBotDeps } from "./bot-deps.js";
 
 type AnyMock = ReturnType<typeof vi.fn>;
-type AnyAsyncMock = ReturnType<typeof vi.fn>;
+type AnyAsyncMock = ReturnType<typeof vi.fn<(...args: unknown[]) => Promise<unknown>>>;
 type GetRuntimeConfigFn =
   typeof import("openclaw/plugin-sdk/runtime-config-snapshot").getRuntimeConfig;
 type LoadSessionStoreFn =
@@ -34,9 +35,18 @@ type ReplyPayloadLike = {
   replyToId?: string;
 };
 
-const { sessionStorePath } = vi.hoisted(() => ({
-  sessionStorePath: `/tmp/openclaw-telegram-${process.pid}-${process.env.VITEST_POOL_ID ?? "0"}.json`,
-}));
+const { sessionStorePath } = vi.hoisted(() => {
+  const tempRoot =
+    process.platform === "win32"
+      ? (process.env.TEMP ?? process.env.TMP ?? "C:\\Windows\\Temp")
+      : (process.env.TMPDIR ?? "/tmp");
+  const separator = process.platform === "win32" ? "\\" : "/";
+  return {
+    sessionStorePath: `${tempRoot.replace(/[\\/]+$/u, "")}${separator}openclaw-telegram-${
+      process.pid
+    }-${process.env.VITEST_POOL_ID ?? "0"}.json`,
+  };
+});
 
 const { loadWebMedia } = vi.hoisted((): { loadWebMedia: AnyMock } => ({
   loadWebMedia: vi.fn(),
@@ -94,7 +104,7 @@ export function setSessionStoreEntriesForTest(entries: SessionStore) {
 const { readChannelAllowFromStore, upsertChannelPairingRequest } = vi.hoisted(
   (): {
     readChannelAllowFromStore: MockFn<TelegramBotDeps["readChannelAllowFromStore"]>;
-    upsertChannelPairingRequest: AnyAsyncMock;
+    upsertChannelPairingRequest: MockFn<TelegramBotDeps["upsertChannelPairingRequest"]>;
   } => ({
     readChannelAllowFromStore: vi.fn(async () => [] as string[]),
     upsertChannelPairingRequest: vi.fn(async () => ({
@@ -104,20 +114,26 @@ const { readChannelAllowFromStore, upsertChannelPairingRequest } = vi.hoisted(
   }),
 );
 
-export function getReadChannelAllowFromStoreMock(): AnyAsyncMock {
+export function getReadChannelAllowFromStoreMock(): MockFn<
+  TelegramBotDeps["readChannelAllowFromStore"]
+> {
   return readChannelAllowFromStore;
 }
 
-export function getUpsertChannelPairingRequestMock(): AnyAsyncMock {
+export function getUpsertChannelPairingRequestMock(): MockFn<
+  TelegramBotDeps["upsertChannelPairingRequest"]
+> {
   return upsertChannelPairingRequest;
 }
 
 const skillCommandListHoisted = vi.hoisted(() => ({
   listSkillCommandsForAgents: vi.fn(() => []),
 }));
-const modelProviderDataHoisted = vi.hoisted(() => ({
-  buildModelsProviderData: vi.fn(),
-}));
+const modelProviderDataHoisted = vi.hoisted(
+  (): { buildModelsProviderData: MockFn<TelegramBotDeps["buildModelsProviderData"]> } => ({
+    buildModelsProviderData: vi.fn(),
+  }),
+);
 const replySpyHoisted = vi.hoisted(() => ({
   replySpy: vi.fn(async (_ctx: MsgContext, opts?: GetReplyOptions) => {
     await opts?.onReplyStart?.();
@@ -154,7 +170,7 @@ async function dispatchHarnessReplies(
       await params.dispatcherOptions.deliver?.(finalPayload, { kind: "final" });
       finalCount += 1;
     } catch (err) {
-      params.dispatcherOptions.onError?.(err, { kind: "final" });
+      void params.dispatcherOptions.onError?.(err, { kind: "final" });
     }
   }
   return {
@@ -288,6 +304,7 @@ const grammySpies = vi.hoisted(() => ({
   sendChatActionSpy: vi.fn(),
   editMessageTextSpy: vi.fn(async () => ({ message_id: 88 })) as AnyAsyncMock,
   editMessageReplyMarkupSpy: vi.fn(async () => ({ message_id: 88 })) as AnyAsyncMock,
+  deleteMessageSpy: vi.fn(async () => true) as AnyAsyncMock,
   setMessageReactionSpy: vi.fn(async () => undefined) as AnyAsyncMock,
   setMyCommandsSpy: vi.fn(async () => undefined) as AnyAsyncMock,
   getMeSpy: vi.fn(async () => ({
@@ -313,6 +330,7 @@ export const answerCallbackQuerySpy: AnyAsyncMock = grammySpies.answerCallbackQu
 export const sendChatActionSpy: AnyMock = grammySpies.sendChatActionSpy;
 export const editMessageTextSpy: AnyAsyncMock = grammySpies.editMessageTextSpy;
 export const editMessageReplyMarkupSpy: AnyAsyncMock = grammySpies.editMessageReplyMarkupSpy;
+export const deleteMessageSpy: AnyAsyncMock = grammySpies.deleteMessageSpy;
 export const setMessageReactionSpy: AnyAsyncMock = grammySpies.setMessageReactionSpy;
 export const setMyCommandsSpy: AnyAsyncMock = grammySpies.setMyCommandsSpy;
 export const getMeSpy: AnyAsyncMock = grammySpies.getMeSpy;
@@ -342,6 +360,7 @@ export const telegramBotRuntimeForTest: TelegramBotRuntimeForTest = {
       sendChatAction: grammySpies.sendChatActionSpy,
       editMessageText: grammySpies.editMessageTextSpy,
       editMessageReplyMarkup: grammySpies.editMessageReplyMarkupSpy,
+      deleteMessage: grammySpies.deleteMessageSpy,
       setMessageReaction: grammySpies.setMessageReactionSpy,
       setMyCommands: grammySpies.setMyCommandsSpy,
       getMe: grammySpies.getMeSpy,
@@ -480,6 +499,9 @@ export function makeForumGroupMessageCtx(params?: {
 
 function clearTelegramDispatchDedupeFilesForTest(): void {
   const dir = path.dirname(sessionStorePath);
+  if (!existsSync(dir)) {
+    return;
+  }
   const prefix = `${path.basename(sessionStorePath)}.telegram-message-dispatch-`;
   for (const entry of readdirSync(dir)) {
     if (entry.startsWith(prefix)) {
@@ -558,6 +580,8 @@ beforeEach(() => {
   editMessageTextSpy.mockResolvedValue({ message_id: 88 });
   editMessageReplyMarkupSpy.mockReset();
   editMessageReplyMarkupSpy.mockResolvedValue({ message_id: 88 });
+  deleteMessageSpy.mockReset();
+  deleteMessageSpy.mockResolvedValue(true);
   enqueueSystemEventSpy.mockReset();
   wasSentByBot.mockReset();
   wasSentByBot.mockReturnValue(false);

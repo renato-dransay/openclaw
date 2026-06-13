@@ -1,11 +1,16 @@
-// Lazy-load pi-coding-agent model metadata so we can infer context windows when
-// the agent reports a model id. This includes custom models.json entries.
+// Load session runtime model metadata so we can infer context windows when the
+// agent reports a model id. This includes custom models.json entries.
 
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { getRuntimeConfig } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { computeBackoff, type BackoffPolicy } from "../infra/backoff.js";
-import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
-import { resolveDefaultAgentDir } from "./agent-scope.js";
+import { discoverAuthStorage, discoverModels } from "./agent-model-discovery.js";
+import {
+  resolveAgentWorkspaceDir,
+  resolveDefaultAgentDir,
+  resolveDefaultAgentId,
+} from "./agent-scope.js";
 import { lookupCachedContextTokens, MODEL_CONTEXT_TOKEN_CACHE } from "./context-cache.js";
 import { CONTEXT_WINDOW_RUNTIME_STATE } from "./context-runtime-state.js";
 import { normalizeProviderId } from "./model-selection.js";
@@ -31,6 +36,8 @@ type ProviderConfigEntry = {
 type ModelsConfig = { providers?: Record<string, ProviderConfigEntry | undefined> };
 
 const ANTHROPIC_GA_1M_MODEL_PREFIXES = [
+  "claude-opus-4-8",
+  "claude-opus-4.8",
   "claude-opus-4-6",
   "claude-opus-4.6",
   "claude-opus-4-7",
@@ -39,6 +46,7 @@ const ANTHROPIC_GA_1M_MODEL_PREFIXES = [
   "claude-sonnet-4.6",
 ] as const;
 export const ANTHROPIC_CONTEXT_1M_TOKENS = 1_048_576;
+export const ANTHROPIC_FABLE_CONTEXT_TOKENS = 1_000_000;
 const CONFIG_LOAD_RETRY_POLICY: BackoffPolicy = {
   initialMs: 1_000,
   maxMs: 60_000,
@@ -60,9 +68,8 @@ export function applyDiscoveredContextWindows(params: {
         : typeof model.contextWindow === "number"
           ? Math.trunc(model.contextWindow)
           : undefined;
-    const contextTokens = shouldUseDiscoveredAnthropicGa1MContextWindow(model)
-      ? ANTHROPIC_CONTEXT_1M_TOKENS
-      : discoveredContextTokens;
+    const contextTokens =
+      resolveDiscoveredAnthropicFixedContextWindow(model) ?? discoveredContextTokens;
     if (!contextTokens || contextTokens <= 0) {
       continue;
     }
@@ -157,19 +164,23 @@ export function ensureContextWindowCacheLoaded(): Promise<void> {
   }
 
   CONTEXT_WINDOW_RUNTIME_STATE.loadPromise = (async () => {
+    const agentDir = resolveDefaultAgentDir(cfg);
+    const workspaceDir = resolveAgentWorkspaceDir(cfg, resolveDefaultAgentId(cfg));
     try {
-      await (await loadModelsConfigRuntime()).ensureOpenClawModelsJson(cfg);
+      await (
+        await loadModelsConfigRuntime()
+      ).ensureOpenClawModelsJson(cfg, agentDir, {
+        workspaceDir,
+      });
     } catch {
       // Continue with best-effort discovery/overrides.
     }
 
     try {
-      const { discoverAuthStorage, discoverModels } =
-        await import("./pi-model-discovery-runtime.js");
-      const agentDir = resolveDefaultAgentDir(cfg);
       const authStorage = discoverAuthStorage(agentDir);
       const modelRegistry = discoverModels(authStorage, agentDir, {
         normalizeModels: false,
+        workspaceDir,
       }) as unknown as ModelRegistryLike;
       const models =
         typeof modelRegistry.getAvailable === "function"
@@ -257,7 +268,7 @@ function resolveConfiguredProviderContextTokens(
     return undefined;
   }
 
-  // Mirror the lookup order in pi-embedded-runner/model.ts: exact key first,
+  // Mirror the lookup order in embedded-agent-runner/model.ts: exact key first,
   // then normalized fallback. This prevents alias collisions from picking the
   // wrong configured cap based on Object.entries iteration order.
   function readProviderContextTokens(providerConfig: ProviderConfigEntry | undefined) {
@@ -307,42 +318,44 @@ function resolveConfiguredProviderContextTokens(
     return exactResult;
   }
 
-  // 2. Normalized fallback: covers alias keys such as "z.ai" → "zai".
+  // 2. Normalized fallback: covers case-only provider key differences.
   const normalizedProvider = normalizeProviderId(provider);
   return findContextTokens((id) => normalizeProviderId(id) === normalizedProvider);
 }
 
-function isAnthropic1MModel(provider: string, model: string): boolean {
-  if (provider !== "anthropic" && provider !== "claude-cli") {
-    return false;
-  }
+function resolveAnthropicFixedContextWindow(provider: string, model: string): number | undefined {
   const modelId = resolveModelFamilyId(model);
-  return ANTHROPIC_GA_1M_MODEL_PREFIXES.some((prefix) => modelId.startsWith(prefix));
+  if (
+    (provider === "anthropic" || provider === "anthropic-vertex") &&
+    modelId.startsWith("claude-fable-5")
+  ) {
+    return ANTHROPIC_FABLE_CONTEXT_TOKENS;
+  }
+  if (provider !== "anthropic" && provider !== "claude-cli") {
+    return undefined;
+  }
+  return ANTHROPIC_GA_1M_MODEL_PREFIXES.some((prefix) => modelId.startsWith(prefix))
+    ? ANTHROPIC_CONTEXT_1M_TOKENS
+    : undefined;
 }
 
-function shouldUseAnthropicGa1MContextWindow(params: {
-  provider?: string;
-  model: string;
-}): boolean {
-  const provider = params.provider ? normalizeProviderId(params.provider) : "";
-  return isAnthropic1MModel(provider, params.model);
-}
-
-function shouldUseDiscoveredAnthropicGa1MContextWindow(model: ModelEntry): boolean {
+function resolveDiscoveredAnthropicFixedContextWindow(model: ModelEntry): number | undefined {
   const provider =
     typeof model.provider === "string" ? normalizeProviderId(model.provider) : undefined;
   const modelId = model.id;
   if (provider) {
-    return isAnthropic1MModel(provider, modelId);
+    return resolveAnthropicFixedContextWindow(provider, modelId);
   }
   const normalized = normalizeLowercaseStringOrEmpty(modelId);
   const slash = normalized.indexOf("/");
   if (slash < 0) {
-    return false;
+    return undefined;
   }
   const inferredProvider = normalizeProviderId(normalized.slice(0, slash));
   const inferredModel = normalized.slice(slash + 1);
-  return inferredProvider === "claude-cli" && isAnthropic1MModel(inferredProvider, inferredModel);
+  return inferredProvider === "claude-cli"
+    ? resolveAnthropicFixedContextWindow(inferredProvider, inferredModel)
+    : undefined;
 }
 
 function resolveModelFamilyId(modelId: string): string {
@@ -368,8 +381,11 @@ export function resolveContextTokensForModel(params: {
   });
   const explicitProvider = params.provider?.trim();
   if (ref) {
-    if (explicitProvider && isAnthropic1MModel(ref.provider, ref.model)) {
-      return ANTHROPIC_CONTEXT_1M_TOKENS;
+    if (explicitProvider) {
+      const fixedContextWindow = resolveAnthropicFixedContextWindow(ref.provider, ref.model);
+      if (fixedContextWindow !== undefined) {
+        return fixedContextWindow;
+      }
     }
     // Only do the config direct scan when the caller explicitly passed a
     // provider. When provider is inferred from a slash in the model string
@@ -388,10 +404,6 @@ export function resolveContextTokensForModel(params: {
         return configuredWindow;
       }
     }
-  }
-
-  if (explicitProvider && ref && shouldUseAnthropicGa1MContextWindow(ref)) {
-    return ANTHROPIC_CONTEXT_1M_TOKENS;
   }
 
   // When provider is explicitly given and the model ID is bare (no slash),

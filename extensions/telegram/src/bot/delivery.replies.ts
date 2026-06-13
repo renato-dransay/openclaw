@@ -1,4 +1,9 @@
+// Telegram plugin module implements delivery.replies behavior.
 import { type Bot, GrammyError, InputFile } from "grammy";
+import {
+  createOutboundPayloadPlan,
+  projectOutboundPayloadPlanForDelivery,
+} from "openclaw/plugin-sdk/channel-outbound";
 import type { ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
 import type { MarkdownTableMode } from "openclaw/plugin-sdk/config-contracts";
 import { fireAndForgetHook } from "openclaw/plugin-sdk/hook-runtime";
@@ -17,16 +22,11 @@ import {
   kindFromMime,
   probeVideoDimensions,
 } from "openclaw/plugin-sdk/media-runtime";
-import {
-  createOutboundPayloadPlan,
-  projectOutboundPayloadPlanForDelivery,
-} from "openclaw/plugin-sdk/outbound-runtime";
 import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
 import { chunkMarkdownTextWithMode, type ChunkMode } from "openclaw/plugin-sdk/reply-chunking";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { danger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
-import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
 import { loadWebMedia } from "openclaw/plugin-sdk/web-media";
 import { resolveTelegramInlineButtons, type TelegramInlineButtons } from "../button-types.js";
@@ -58,7 +58,6 @@ const VOICE_FORBIDDEN_MARKER = "VOICE_MESSAGES_FORBIDDEN";
 const CAPTION_TOO_LONG_RE = /caption is too long/i;
 const GrammyErrorCtor: typeof GrammyError | undefined =
   typeof GrammyError === "function" ? GrammyError : undefined;
-const silentReplyLogger = createSubsystemLogger("telegram/silent-reply");
 
 type DeliveryProgress = ReplyThreadDeliveryProgress & {
   deliveredCount: number;
@@ -294,8 +293,7 @@ async function sendTelegramVoiceFallbackText(opts: {
   let firstDeliveredMessageId: number | undefined;
   const chunks = filterEmptyTelegramTextChunks(opts.chunkText(opts.text));
   let appliedReplyTo = false;
-  for (let i = 0; i < chunks.length; i += 1) {
-    const chunk = chunks[i];
+  for (const chunk of chunks) {
     // Only apply reply reference, quote text, and buttons to the first chunk.
     const replyToForChunk = !appliedReplyTo ? opts.replyToId : undefined;
     const applyQuoteForChunk = !appliedReplyTo;
@@ -754,18 +752,6 @@ export async function deliverReplies(params: {
       surface: "telegram",
     }),
   );
-  const originalExactSilentCount = candidateReplies.filter(
-    (reply) => typeof reply.text === "string" && reply.text.trim().toUpperCase() === "NO_REPLY",
-  ).length;
-  if (originalExactSilentCount > 0) {
-    silentReplyLogger.debug("telegram delivery normalized NO_REPLY candidates", {
-      hasSessionKey: Boolean(params.sessionKeyForInternalHooks),
-      hasChatId: params.chatId.length > 0,
-      originalCount: candidateReplies.length,
-      normalizedCount: normalizedReplies.length,
-      originalExactSilentCount,
-    });
-  }
   for (const originalReply of normalizedReplies) {
     let reply = originalReply;
     const mediaList = reply?.mediaUrls?.length

@@ -1,15 +1,30 @@
+// Telegram plugin module implements draft stream behavior.
 import type { Bot } from "grammy";
 import {
   createFinalizableDraftStreamControlsForState,
   takeMessageIdAfterStop,
-} from "openclaw/plugin-sdk/channel-lifecycle";
+} from "openclaw/plugin-sdk/channel-outbound";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { buildTelegramThreadParams, type TelegramThreadSpec } from "./bot/helpers.js";
-import { isSafeToRetrySendError, isTelegramClientRejection } from "./network-errors.js";
+import {
+  isRecoverableTelegramNetworkError,
+  isSafeToRetrySendError,
+  isTelegramClientRejection,
+  isTelegramMessageNotModifiedError,
+  isTelegramRateLimitError,
+  readTelegramRetryAfterMs,
+} from "./network-errors.js";
 import { normalizeTelegramReplyToMessageId } from "./outbound-params.js";
 
 const TELEGRAM_STREAM_MAX_CHARS = 4096;
 const DEFAULT_THROTTLE_MS = 1000;
+// Retryable preview failures keep the latest text pending for the next throttle
+// tick; cap consecutive misses so a persistent outage stops the preview instead
+// of warn-spamming for the rest of the run.
+const MAX_CONSECUTIVE_PREVIEW_FAILURES = 3;
+// Flood waits beyond this freeze the preview longer than it is useful; clamp so
+// a large retry_after cannot park the suspension past the run's lifetime.
+const MAX_PREVIEW_FLOOD_SUSPEND_MS = 60_000;
 
 export type TelegramDraftStream = {
   update: (text: string) => void;
@@ -108,15 +123,17 @@ export function createTelegramDraftStream(params: {
 
   const streamState = { stopped: false, final: false };
   let messageSendAttempted = false;
+  let suspendedUntilMs = 0;
+  let consecutivePreviewFailures = 0;
   let streamMessageId: number | undefined;
   let streamVisibleSinceMs: number | undefined;
   let lastSentText = "";
   let lastDeliveredText = "";
+  let lastRequestedText = "";
   let lastSentParseMode: "HTML" | undefined;
   let previewRevision = 0;
   let generation = 0;
   let deliveredTextOffset = 0;
-  let resetStreamToNewMessage: (options?: { keepPending?: boolean; resetOffset?: boolean }) => void;
   type PreviewSendParams = {
     renderedText: string;
     renderedParseMode: "HTML" | undefined;
@@ -177,6 +194,7 @@ export function createTelegramDraftStream(params: {
         textSnapshot: renderedText,
         parseMode: renderedParseMode,
         visibleSinceMs,
+        retain: true,
       });
       return true;
     }
@@ -184,9 +202,22 @@ export function createTelegramDraftStream(params: {
     streamVisibleSinceMs = visibleSinceMs;
     return true;
   };
+  const stopOversizedPreview = (renderedText: string): false => {
+    streamState.stopped = true;
+    params.warn?.(
+      `telegram stream preview stopped (text length ${renderedText.length} > ${maxChars})`,
+    );
+    return false;
+  };
 
   const sendOrEditStreamMessage = async (text: string): Promise<boolean> => {
     if (streamState.stopped && !streamState.final) {
+      return false;
+    }
+    // Flood-control suspension: returning false keeps the newest text pending,
+    // so the first tick after retry_after delivers it. Final flushes still try
+    // so the last text has a chance to land.
+    if (!streamState.final && Date.now() < suspendedUntilMs) {
       return false;
     }
     const trimmed = text.trimEnd();
@@ -204,13 +235,22 @@ export function createTelegramDraftStream(params: {
       return false;
     }
     if (renderedText.length > maxChars) {
+      const chunkLength = findTelegramDraftChunkLength(currentText, maxChars, params.renderText);
+      if (!streamState.final) {
+        if (chunkLength > 0) {
+          return await sendOrEditStreamMessage(
+            trimmed.slice(0, deliveredTextOffset) + currentText.slice(0, chunkLength),
+          );
+        }
+        return stopOversizedPreview(renderedText);
+      }
       if (lastDeliveredText.length > deliveredTextOffset) {
         const supersededMessageId = streamMessageId;
         const supersededTextSnapshot = lastSentText;
         const supersededParseMode = lastSentParseMode;
         const supersededVisibleSinceMs = streamVisibleSinceMs;
         deliveredTextOffset = lastDeliveredText.length;
-        resetStreamToNewMessage({ keepPending: true, resetOffset: false });
+        resetStreamToNewMessage({ keepFinal: true, keepPending: true, resetOffset: false });
         if (typeof supersededMessageId === "number") {
           params.onSupersededPreview?.({
             messageId: supersededMessageId,
@@ -222,7 +262,6 @@ export function createTelegramDraftStream(params: {
         }
         return await sendOrEditStreamMessage(trimmed);
       }
-      const chunkLength = findTelegramDraftChunkLength(currentText, maxChars, params.renderText);
       if (chunkLength > 0) {
         const sent = await sendOrEditStreamMessage(
           trimmed.slice(0, deliveredTextOffset) + currentText.slice(0, chunkLength),
@@ -232,11 +271,7 @@ export function createTelegramDraftStream(params: {
         }
         return await sendOrEditStreamMessage(trimmed);
       }
-      streamState.stopped = true;
-      params.warn?.(
-        `telegram stream preview stopped (text length ${renderedText.length} > ${maxChars})`,
-      );
-      return false;
+      return stopOversizedPreview(renderedText);
     }
     if (renderedText === lastSentText && renderedParseMode === lastSentParseMode) {
       return true;
@@ -249,6 +284,8 @@ export function createTelegramDraftStream(params: {
       }
     }
 
+    const previousSentText = lastSentText;
+    const previousSentParseMode = lastSentParseMode;
     lastSentText = renderedText;
     lastSentParseMode = renderedParseMode;
     try {
@@ -260,24 +297,84 @@ export function createTelegramDraftStream(params: {
       if (sent) {
         previewRevision += 1;
         lastDeliveredText = trimmed;
+        consecutivePreviewFailures = 0;
+        suspendedUntilMs = 0;
       }
       return sent;
     } catch (err) {
+      const isEdit = typeof streamMessageId === "number";
+      if (isEdit && isTelegramMessageNotModifiedError(err)) {
+        // Telegram already shows exactly this text; count the edit as delivered.
+        consecutivePreviewFailures = 0;
+        lastDeliveredText = trimmed;
+        return true;
+      }
+      // Roll back the dedupe snapshot so the retried tick is not skipped as a no-op.
+      lastSentText = previousSentText;
+      lastSentParseMode = previousSentParseMode;
+      // Flood control is always retryable: Telegram rejected the call outright.
+      // Beyond that, edits retry on any transient network error (re-editing the
+      // same content is idempotent) while an unsent first preview retries only
+      // on provably pre-connect failures — anything ambiguous could duplicate
+      // the preview message.
+      const retryable =
+        isTelegramRateLimitError(err) ||
+        (isEdit ? isRecoverableTelegramNetworkError(err) : isSafeToRetrySendError(err));
+      consecutivePreviewFailures += 1;
+      if (retryable && consecutivePreviewFailures <= MAX_CONSECUTIVE_PREVIEW_FAILURES) {
+        const retryAfterMs = readTelegramRetryAfterMs(err);
+        if (retryAfterMs !== undefined) {
+          suspendedUntilMs = Date.now() + Math.min(retryAfterMs, MAX_PREVIEW_FLOOD_SUSPEND_MS);
+        }
+        params.warn?.(
+          `telegram stream preview ${isEdit ? "edit" : "send"} failed (retrying): ${formatErrorMessage(err)}`,
+        );
+        return false;
+      }
       streamState.stopped = true;
       params.warn?.(`telegram stream preview failed: ${formatErrorMessage(err)}`);
       return false;
     }
   };
 
-  const { loop, update, stop, stopForClear } = createFinalizableDraftStreamControlsForState({
+  const {
+    loop,
+    update: updateDraft,
+    stopForClear,
+  } = createFinalizableDraftStreamControlsForState({
     throttleMs,
     state: streamState,
     sendOrEditStreamMessage,
   });
 
-  resetStreamToNewMessage = (options) => {
+  const update = (text: string) => {
+    if (streamState.stopped || streamState.final) {
+      return;
+    }
+    lastRequestedText = text;
+    updateDraft(text);
+  };
+
+  const stop = async () => {
+    streamState.final = true;
+    await loop.flush();
+    if (streamState.stopped) {
+      return;
+    }
+    const finalText = lastRequestedText.trimEnd();
+    if (finalText && finalText !== lastDeliveredText.trimEnd()) {
+      await sendOrEditStreamMessage(finalText);
+    }
+    streamState.final = true;
+  };
+
+  const resetStreamToNewMessage: (options?: {
+    keepFinal?: boolean;
+    keepPending?: boolean;
+    resetOffset?: boolean;
+  }) => void = (options) => {
     streamState.stopped = false;
-    streamState.final = false;
+    streamState.final = options?.keepFinal === true;
     generation += 1;
     messageSendAttempted = false;
     streamMessageId = undefined;
@@ -286,6 +383,7 @@ export function createTelegramDraftStream(params: {
     lastSentParseMode = undefined;
     if (options?.resetOffset !== false) {
       deliveredTextOffset = 0;
+      lastRequestedText = "";
     }
     if (!options?.keepPending) {
       loop.resetPending();
@@ -308,7 +406,6 @@ export function createTelegramDraftStream(params: {
       } catch (err) {
         params.warn?.(`telegram stream preview cleanup failed: ${formatErrorMessage(err)}`);
       }
-      return;
     }
   };
 

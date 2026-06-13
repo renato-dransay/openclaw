@@ -13,7 +13,7 @@ import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import { assertSupportedRuntime } from "../infra/runtime-guard.js";
 import type { PluginManifestCommandAliasRegistry } from "../plugins/manifest-command-aliases.js";
 import { resolveCliArgvInvocation } from "./argv-invocation.js";
-import { hasFlag } from "./argv.js";
+import { hasFlag, normalizeGeneratedHelpCommandArgv, normalizeRootHelpTargetArgv } from "./argv.js";
 import {
   isReservedNonPluginCommandRoot,
   shouldRegisterPrimaryCommandOnly,
@@ -797,6 +797,8 @@ export async function runCli(argv: string[] = process.argv) {
       routeLogsToStderr();
     }
 
+    const parseArgv = normalizeGeneratedHelpCommandArgv(rewriteUpdateFlagArgv(normalizedArgv));
+    const suppressStartupProgress = hasJsonOutputFlag(parseArgv);
     const { createCliProgress } = await import("./progress.js");
     const startupProgress = createCliProgress({
       label: "Loading OpenClaw CLI…",

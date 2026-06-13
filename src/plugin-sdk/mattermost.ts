@@ -12,7 +12,7 @@ export {
   clearHistoryEntriesIfEnabled,
   recordPendingHistoryEntryIfEnabled,
 } from "../auto-reply/reply/history.js";
-export { listSkillCommandsForAgents } from "../auto-reply/skill-commands.js";
+export { listSkillCommandsForAgents } from "../skills/discovery/chat-commands.js";
 export type { ReplyPayload } from "./reply-payload.js";
 export type { ChatType } from "../channels/chat-type.js";
 export { logInboundDrop, logTypingFailure } from "../channels/logging.js";

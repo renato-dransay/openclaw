@@ -2,7 +2,11 @@
 import { Type, type TSchema } from "typebox";
 import { NonEmptyString } from "./primitives.js";
 
-function cronAgentTurnPayloadSchema(params: { message: TSchema; toolsAllow: TSchema }) {
+function cronAgentTurnPayloadSchema(params: {
+  message: TSchema;
+  model: TSchema;
+  toolsAllow: TSchema;
+}) {
   const completionContractSchema = Type.Object(
     {
       requiredPhrases: Type.Array(NonEmptyString, { minItems: 1 }),

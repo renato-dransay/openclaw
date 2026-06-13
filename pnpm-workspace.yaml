@@ -63,6 +63,8 @@ minimumReleaseAgeExclude:
   - "sqlite-vec-*"
   - "rastermill"
   - "clawpdf"
+  - "esbuild@0.28.1"
+  - "@esbuild/*"
 
 nodeLinker: hoisted
 blockExoticSubdeps: true

@@ -467,6 +467,7 @@ export async function resolveMessagingTarget(params: {
           kind: alternateKind,
           display: entry.name ?? entry.handle ?? stripTargetPrefixes(entry.id),
           source: "directory",
+          resolutionSource: "directory",
         },
       };
     }
@@ -482,6 +483,7 @@ export async function resolveMessagingTarget(params: {
               kind: alternateKind,
               display: best.name ?? best.handle ?? stripTargetPrefixes(best.id),
               source: "directory",
+              resolutionSource: "directory",
             },
           };
         }

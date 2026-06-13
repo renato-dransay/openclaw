@@ -7,7 +7,12 @@ import {
   NON_PACKAGED_BUNDLED_PLUGIN_DIRS,
 } from "./scripts/lib/bundled-plugin-build-entries.mjs";
 import { bundledPluginFile } from "./scripts/lib/bundled-plugin-paths.mjs";
-import { buildPluginSdkEntrySources } from "./scripts/lib/plugin-sdk-entries.mjs";
+import {
+  buildPluginSdkEntrySources,
+  pluginSdkEntrypoints,
+  publicPluginSdkEntrypoints,
+} from "./scripts/lib/plugin-sdk-entries.mjs";
+import { tsdownPackageOutputRoot } from "./scripts/lib/tsdown-output-roots.mjs";
 
 type InputOptionsFactory = Extract<NonNullable<UserConfig["inputOptions"]>, Function>;
 type InputOptionsArg = InputOptionsFactory extends (

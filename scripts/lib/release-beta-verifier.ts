@@ -1,6 +1,8 @@
+// Release Beta Verifier script supports OpenClaw repository automation.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { readBoundedResponseText } from "./bounded-response.ts";
 import { collectClawHubPublishablePluginPackages } from "./plugin-clawhub-release.ts";
 import {
   collectPublishablePluginPackages,
@@ -16,9 +18,11 @@ export type ReleaseVerifyBetaArgs = {
   repo: string;
   registry: string;
   workflowRef?: string;
+  clawHubWorkflowRef?: string;
   pluginSelection: string[];
   evidenceOut?: string;
   skipPostpublish: boolean;
+  skipGitHubRelease: boolean;
   skipClawHub: boolean;
   rerunFailedClawHub: boolean;
   workflowRuns: {
@@ -26,6 +30,7 @@ export type ReleaseVerifyBetaArgs = {
     openclawNpm?: string;
     pluginNpm?: string;
     pluginClawHub?: string;
+    pluginClawHubBootstrap?: string;
     npmTelegram?: string;
   };
 };
@@ -45,6 +50,8 @@ type WorkflowRunSummary = {
 
 const DEFAULT_REPO = "openclaw/openclaw";
 const DEFAULT_CLAWHUB_REGISTRY = "https://clawhub.ai";
+const CLAWHUB_REQUEST_TIMEOUT_MS = 20_000;
+const CLAWHUB_RESPONSE_BODY_MAX_BYTES = 1024 * 1024;
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -114,7 +121,7 @@ export function parseReleaseVerifyBetaArgs(argv: string[]): ReleaseVerifyBetaArg
   const version = values.shift();
   if (!version || version.startsWith("-")) {
     throw new Error(
-      "Usage: pnpm release:verify-beta -- <version> [--workflow-ref REF] [--full-release-validation-run ID] [--openclaw-npm-run ID] [--plugin-npm-run ID] [--plugin-clawhub-run ID] [--npm-telegram-run ID] [--skip-clawhub]",
+      "Usage: pnpm release:verify-beta -- <version> [--workflow-ref REF] [--clawhub-workflow-ref REF] [--full-release-validation-run ID] [--openclaw-npm-run ID] [--plugin-npm-run ID] [--plugin-clawhub-run ID] [--plugin-clawhub-bootstrap-run ID] [--npm-telegram-run ID] [--skip-github-release] [--skip-clawhub]",
     );
   }
 
@@ -125,9 +132,11 @@ export function parseReleaseVerifyBetaArgs(argv: string[]): ReleaseVerifyBetaArg
     repo: DEFAULT_REPO,
     registry: DEFAULT_CLAWHUB_REGISTRY,
     workflowRef: undefined,
+    clawHubWorkflowRef: undefined,
     pluginSelection: [],
     evidenceOut: undefined,
     skipPostpublish: false,
+    skipGitHubRelease: false,
     skipClawHub: false,
     rerunFailedClawHub: false,
     workflowRuns: {},
@@ -160,6 +169,9 @@ export function parseReleaseVerifyBetaArgs(argv: string[]): ReleaseVerifyBetaArg
       case "--workflow-ref":
         parsed.workflowRef = next();
         break;
+      case "--clawhub-workflow-ref":
+        parsed.clawHubWorkflowRef = next();
+        break;
       case "--plugins":
         parsed.pluginSelection = parsePluginReleaseSelection(next());
         if (parsed.pluginSelection.length === 0) {
@@ -181,11 +193,17 @@ export function parseReleaseVerifyBetaArgs(argv: string[]): ReleaseVerifyBetaArg
       case "--plugin-clawhub-run":
         parsed.workflowRuns.pluginClawHub = next();
         break;
+      case "--plugin-clawhub-bootstrap-run":
+        parsed.workflowRuns.pluginClawHubBootstrap = next();
+        break;
       case "--npm-telegram-run":
         parsed.workflowRuns.npmTelegram = next();
         break;
       case "--skip-postpublish":
         parsed.skipPostpublish = true;
+        break;
+      case "--skip-github-release":
+        parsed.skipGitHubRelease = true;
         break;
       case "--skip-clawhub":
         parsed.skipClawHub = true;
@@ -209,7 +227,10 @@ async function fetchWithRetry(
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const response = await fetch(url, options);
+      const response = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(CLAWHUB_REQUEST_TIMEOUT_MS),
+      });
       if (response.status !== 429 && response.status < 500) {
         return response;
       }
@@ -218,7 +239,9 @@ async function fetchWithRetry(
       lastError = error;
     }
     if (attempt < attempts) {
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, attempt * 1000));
+      await new Promise((resolveDelay) => {
+        setTimeout(resolveDelay, attempt * 1000);
+      });
     }
   }
   const message = lastError instanceof Error ? lastError.message : String(lastError);
@@ -230,7 +253,15 @@ async function fetchJsonWithRetry(url: string): Promise<unknown> {
   if (!response.ok) {
     throw new Error(`${url} returned HTTP ${response.status}.`);
   }
-  return response.json() as Promise<unknown>;
+  return await readBoundedJsonResponse(response, url);
+}
+
+export async function readBoundedJsonResponse(
+  response: Response,
+  label: string,
+  maxBytes = CLAWHUB_RESPONSE_BODY_MAX_BYTES,
+): Promise<unknown> {
+  return parseJson(await readBoundedResponseText(response, label, maxBytes), label);
 }
 
 async function fetchStatusWithRetry(url: string, method: "GET" | "HEAD"): Promise<number> {
@@ -342,6 +373,7 @@ function verifyWorkflowRun(params: {
   repo: string;
   expectedWorkflowName: string;
   expectedHeadBranch?: string;
+  allowedHeadBranches?: string[];
   rerunFailed: boolean;
 }): WorkflowRunSummary {
   const raw = runCommand("gh", [
@@ -370,9 +402,12 @@ function verifyWorkflowRun(params: {
     );
   }
   const headBranch = readString(run.headBranch);
-  if (params.expectedHeadBranch !== undefined && headBranch !== params.expectedHeadBranch) {
+  const allowedHeadBranches =
+    params.allowedHeadBranches ??
+    (params.expectedHeadBranch !== undefined ? [params.expectedHeadBranch] : []);
+  if (allowedHeadBranches.length > 0 && !allowedHeadBranches.includes(headBranch ?? "")) {
     throw new Error(
-      `${params.label}: run ${params.id} branch is ${headBranch ?? "<missing>"}, expected ${params.expectedHeadBranch}.`,
+      `${params.label}: run ${params.id} branch is ${headBranch ?? "<missing>"}, expected ${allowedHeadBranches.join(" or ")}.`,
     );
   }
   const status = readString(run.status);
@@ -458,8 +493,12 @@ export async function verifyBetaRelease(
   }
 
   const lines: string[] = [];
-  const releaseUrl = verifyGitHubRelease(args);
-  lines.push(`GitHub release OK: ${releaseUrl}`);
+  const releaseUrl = args.skipGitHubRelease ? undefined : verifyGitHubRelease(args);
+  if (releaseUrl === undefined) {
+    lines.push("GitHub release skipped: final release page is created after verification");
+  } else {
+    lines.push(`GitHub release OK: ${releaseUrl}`);
+  }
 
   const openclawNpm = verifyNpmPackage("openclaw", args.version, args.distTag);
   lines.push(`openclaw npm OK: ${args.version} (${args.distTag})`);
@@ -519,7 +558,7 @@ export async function verifyBetaRelease(
         label: "Full Release Validation",
         repo: args.repo,
         expectedWorkflowName: "Full Release Validation",
-        expectedHeadBranch: args.workflowRef,
+        allowedHeadBranches: ["main", args.workflowRef],
         rerunFailed: false,
       }),
     );
@@ -537,14 +576,28 @@ export async function verifyBetaRelease(
     );
   }
   if (args.workflowRuns.pluginClawHub !== undefined) {
+    const clawHubWorkflowRef = args.clawHubWorkflowRef ?? args.workflowRef;
     workflowRuns.push(
       verifyWorkflowRun({
         id: args.workflowRuns.pluginClawHub,
         label: "Plugin ClawHub Release",
         repo: args.repo,
         expectedWorkflowName: "Plugin ClawHub Release",
-        expectedHeadBranch: args.workflowRef,
+        expectedHeadBranch: clawHubWorkflowRef,
         rerunFailed: args.rerunFailedClawHub,
+      }),
+    );
+  }
+  if (args.workflowRuns.pluginClawHubBootstrap !== undefined) {
+    const clawHubWorkflowRef = args.clawHubWorkflowRef ?? args.workflowRef;
+    workflowRuns.push(
+      verifyWorkflowRun({
+        id: args.workflowRuns.pluginClawHubBootstrap,
+        label: "Plugin ClawHub New",
+        repo: args.repo,
+        expectedWorkflowName: "Plugin ClawHub New",
+        expectedHeadBranch: clawHubWorkflowRef,
+        rerunFailed: false,
       }),
     );
   }
@@ -591,7 +644,7 @@ export async function verifyBetaRelease(
           npmDistTag: args.distTag,
           pluginSelection: args.pluginSelection,
           openclawNpmIntegrity: openclawNpm.integrity,
-          githubReleaseUrl: releaseUrl,
+          githubReleaseUrl: releaseUrl ?? null,
           pluginNpmPackageCount: npmPlugins.length,
           clawHubPackageCount: clawHubPlugins.length,
           workflowRuns,

@@ -1,3 +1,4 @@
+// Msteams plugin module implements channel behavior.
 import { describeAccountSnapshot } from "openclaw/plugin-sdk/account-helpers";
 import { formatAllowFromLowercase } from "openclaw/plugin-sdk/allow-from";
 import { createTopLevelChannelConfigAdapter } from "openclaw/plugin-sdk/channel-config-helpers";
@@ -6,7 +7,10 @@ import type {
   ChannelMessageToolDiscovery,
 } from "openclaw/plugin-sdk/channel-contract";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/channel-core";
-import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-message";
+import {
+  createChannelMessageAdapterFromOutbound,
+  createRuntimeOutboundDelegates,
+} from "openclaw/plugin-sdk/channel-outbound";
 import { createPairingPrefixStripper } from "openclaw/plugin-sdk/channel-pairing";
 import {
   createAllowlistProviderGroupPolicyWarningCollector,
@@ -19,7 +23,6 @@ import {
 } from "openclaw/plugin-sdk/directory-runtime";
 import { normalizeMessagePresentation } from "openclaw/plugin-sdk/interactive-runtime";
 import { createLazyRuntimeNamedExport } from "openclaw/plugin-sdk/lazy-runtime";
-import { createRuntimeOutboundDelegates } from "openclaw/plugin-sdk/outbound-runtime";
 import { createComputedAccountStatusAdapter } from "openclaw/plugin-sdk/status-helpers";
 import {
   normalizeOptionalString,
@@ -85,6 +88,12 @@ const TEAMS_GRAPH_PERMISSION_HINTS: Record<string, string> = {
   "Sites.Read.All": "files (SharePoint)",
   "Files.Read.All": "files (OneDrive)",
 };
+
+const MSTEAMS_GROUP_MANAGEMENT_ACTIONS = new Set<ChannelMessageActionName>([
+  "addParticipant",
+  "removeParticipant",
+  "renameGroup",
+]);
 
 const collectMSTeamsSecurityWarnings = createAllowlistProviderGroupPolicyWarningCollector<{
   cfg: OpenClawConfig;
@@ -173,6 +182,18 @@ function actionError(message: string) {
     content: [{ type: "text" as const, text: message }],
     details: { error: message },
   };
+}
+
+function requireMSTeamsGroupManagementAuthorization(ctx: {
+  senderIsOwner?: boolean;
+  gatewayClientScopes?: readonly string[];
+}): ReturnType<typeof actionError> | null {
+  if (ctx.senderIsOwner === true || ctx.gatewayClientScopes?.includes("operator.admin")) {
+    return null;
+  }
+  return actionError(
+    "Microsoft Teams group management requires an owner or operator.admin requester.",
+  );
 }
 
 function resolveActionTarget(
@@ -687,7 +708,16 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
       },
       actions: {
         describeMessageTool: describeMSTeamsMessageTool,
+        requiresTrustedRequesterSender: ({ action, toolContext }) =>
+          normalizeOptionalString(toolContext?.currentChannelProvider)?.toLowerCase() ===
+            "msteams" && MSTEAMS_GROUP_MANAGEMENT_ACTIONS.has(action),
         handleAction: async (ctx) => {
+          if (MSTEAMS_GROUP_MANAGEMENT_ACTIONS.has(ctx.action)) {
+            const authError = requireMSTeamsGroupManagementAuthorization(ctx);
+            if (authError) {
+              return authError;
+            }
+          }
           const presentation =
             ctx.action === "send"
               ? normalizeMessagePresentation(ctx.params.presentation)

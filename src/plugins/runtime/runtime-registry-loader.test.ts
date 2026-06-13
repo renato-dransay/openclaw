@@ -1,3 +1,4 @@
+// Runtime registry loader tests cover plugin runtime assembly and activation boundaries.
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyPluginRegistry } from "../registry.js";
 
@@ -19,6 +20,8 @@ const mocks = vi.hoisted(() => ({
     vi.fn<typeof import("../effective-plugin-ids.js").resolveEffectivePluginIds>(),
   applyPluginAutoEnable:
     vi.fn<typeof import("../../config/plugin-auto-enable.js").applyPluginAutoEnable>(),
+  resolvePluginMetadataSnapshot:
+    vi.fn<typeof import("../plugin-metadata-snapshot.js").resolvePluginMetadataSnapshot>(),
   resolveAgentWorkspaceDir: vi.fn<
     typeof import("../../agents/agent-scope.js").resolveAgentWorkspaceDir
   >(() => "/resolved-workspace"),
@@ -104,6 +107,12 @@ vi.mock("../../config/plugin-auto-enable.js", () => ({
     mocks.applyPluginAutoEnable(...args),
 }));
 
+vi.mock("../plugin-metadata-snapshot.js", () => ({
+  resolvePluginMetadataSnapshot: (
+    ...args: Parameters<typeof mocks.resolvePluginMetadataSnapshot>
+  ) => mocks.resolvePluginMetadataSnapshot(...args),
+}));
+
 vi.mock("../../agents/agent-scope.js", () => ({
   resolveAgentWorkspaceDir: (...args: Parameters<typeof mocks.resolveAgentWorkspaceDir>) =>
     mocks.resolveAgentWorkspaceDir(...args),
@@ -129,6 +138,7 @@ describe("ensurePluginRegistryLoaded", () => {
     mocks.resolveChannelPluginIds.mockReset();
     mocks.resolveEffectivePluginIds.mockReset();
     mocks.applyPluginAutoEnable.mockReset();
+    mocks.resolvePluginMetadataSnapshot.mockReset();
     mocks.resolveAgentWorkspaceDir.mockClear();
     mocks.resolveDefaultAgentId.mockClear();
     resetPluginRegistryLoadedForTests();

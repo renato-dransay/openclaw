@@ -1,6 +1,7 @@
+/** Builds installed-index records from normalized plugin manifest registry entries. */
 import path from "node:path";
+import { normalizeSortedUniqueStringEntries } from "@openclaw/normalization-core/string-normalization";
 import type { OpenClawConfig } from "../config/types.js";
-import { normalizeSortedUniqueStringEntries } from "../shared/string-normalization.js";
 import type { PluginCompatCode } from "./compat/registry.js";
 import { normalizePluginsConfig, resolveEffectiveEnableState } from "./config-state.js";
 import { isPluginEnabledByDefaultForPlatform } from "./default-enablement.js";
@@ -10,6 +11,7 @@ import { describePluginInstallSource } from "./install-source-info.js";
 import { hashJson, safeFileSignature, safeHashFile } from "./installed-plugin-index-hash.js";
 import { hasOptionalMissingPluginManifestFile } from "./installed-plugin-index-manifest.js";
 import type {
+  InstalledPluginContributionInfo,
   InstalledPluginIndexRecord,
   InstalledPluginInstallRecordInfo,
   InstalledPluginPackageChannelInfo,
@@ -31,9 +33,39 @@ function buildStartupInfo(record: PluginManifestRecord): InstalledPluginStartupI
       ...(record.activation?.onAgentHarnesses ?? []),
       ...(record.cliBackends ?? []),
     ]),
+    configPaths: normalizeSortedUniqueStringEntries(record.activation?.onConfigPaths),
   };
 }
 
+function buildContributionInfo(record: PluginManifestRecord): InstalledPluginContributionInfo {
+  const contracts = Object.fromEntries(
+    Object.entries(record.contracts ?? {}).map(([key, values]) => [
+      key,
+      normalizeSortedUniqueStringEntries(values),
+    ]),
+  );
+  return {
+    channels: normalizeSortedUniqueStringEntries(record.channels),
+    channelConfigs: normalizeSortedUniqueStringEntries(Object.keys(record.channelConfigs ?? {})),
+    providers: normalizeSortedUniqueStringEntries(record.providers),
+    modelCatalogProviders: normalizeSortedUniqueStringEntries([
+      ...Object.keys(record.modelCatalog?.providers ?? {}),
+      ...Object.keys(record.modelCatalog?.aliases ?? {}),
+      ...(record.modelCatalog?.suppressions ?? []).map((entry) => entry.provider),
+    ]),
+    modelSupportPrefixes: normalizeSortedUniqueStringEntries(record.modelSupport?.modelPrefixes),
+    modelSupportPatterns: normalizeSortedUniqueStringEntries(record.modelSupport?.modelPatterns),
+    autoEnableProviderIds: normalizeSortedUniqueStringEntries(
+      record.autoEnableWhenConfiguredProviders,
+    ),
+    commandAliases: normalizeSortedUniqueStringEntries(
+      record.commandAliases?.map((alias) => alias.name),
+    ),
+    contracts,
+  };
+}
+
+/** Collects compatibility codes implied by a manifest's legacy or activation surfaces. */
 export function collectPluginManifestCompatCodes(
   record: PluginManifestRecord,
 ): readonly PluginCompatCode[] {
@@ -79,7 +111,9 @@ function resolvePackageJsonPath(
     safeRealpathSync(candidate.packageDir, realpathCache) ?? path.resolve(candidate.packageDir);
   const packageJsonPath = path.join(packageDir, "package.json");
   const rootDir =
-    safeRealpathSync(candidate.rootDir, realpathCache) ?? path.resolve(candidate.rootDir);
+    candidate.rootDir === candidate.packageDir
+      ? packageDir
+      : (safeRealpathSync(candidate.rootDir, realpathCache) ?? path.resolve(candidate.rootDir));
   const packageJsonRealPath = safeRealpathSync(packageJsonPath, realpathCache);
   return packageJsonRealPath && isPathInside(rootDir, packageJsonRealPath)
     ? packageJsonPath
@@ -91,7 +125,10 @@ function resolvePackageJsonRelativePath(
   packageJsonPath: string,
   realpathCache: Map<string, string>,
 ): string {
-  const resolvedRootDir = safeRealpathSync(rootDir, realpathCache) ?? path.resolve(rootDir);
+  const resolvedRootDir =
+    rootDir === path.dirname(packageJsonPath)
+      ? path.dirname(packageJsonPath)
+      : (safeRealpathSync(rootDir, realpathCache) ?? path.resolve(rootDir));
   const relativePath = path.relative(resolvedRootDir, packageJsonPath) || "package.json";
   return relativePath.split(path.sep).join("/");
 }
@@ -250,6 +287,7 @@ export function buildInstalledPluginIndexRecords(params: {
       origin: record.origin,
       enabled,
       startup: buildStartupInfo(record),
+      contributions: buildContributionInfo(record),
       compat: collectPluginManifestCompatCodes(record),
     };
     if (record.format && record.format !== "openclaw") {

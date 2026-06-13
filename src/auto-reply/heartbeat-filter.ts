@@ -1,6 +1,7 @@
-import { isRecord } from "../shared/record-coerce.js";
-import { normalizeOptionalString as readString } from "../shared/string-coerce.js";
-import { uniqueStrings } from "../shared/string-normalization.js";
+// Transcript filter for removing heartbeat-only prompt/ack artifacts.
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { normalizeOptionalString as readString } from "@openclaw/normalization-core/string-coerce";
+import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import { HEARTBEAT_RESPONSE_TOOL_NAME } from "./heartbeat-tool-response.js";
 import {
   HEARTBEAT_RESPONSE_TOOL_PROMPT,
@@ -26,7 +27,10 @@ const TOOL_RESULT_BLOCK_TYPES = new Set([
   "tool_result_error",
   "function_call_output",
 ]);
-const MESSAGE_TOOL_DELIVERY_PREFIX = "Delivery: to send a message, use the `message` tool.";
+const MESSAGE_TOOL_DELIVERY_PREFIXES = [
+  "Delivery: to send a message, use the `message` tool.",
+  "Delivery: Final assistant text is not automatically delivered in this run. Use the `message` tool to send user-visible output.",
+] as const;
 
 type HeartbeatTranscriptMessage = { role: string; content?: unknown };
 
@@ -282,6 +286,7 @@ function resolveMessageText(content: unknown): { text: string; hasNonTextContent
   return { text, hasNonTextContent };
 }
 
+/** Return whether a user message is an internal heartbeat prompt. */
 export function isHeartbeatUserMessage(
   message: { role: string; content?: unknown },
   heartbeatPrompt?: string,
@@ -299,7 +304,7 @@ export function isHeartbeatUserMessage(
     return true;
   }
   if (
-    trimmed.startsWith(MESSAGE_TOOL_DELIVERY_PREFIX) &&
+    MESSAGE_TOOL_DELIVERY_PREFIXES.some((prefix) => trimmed.startsWith(prefix)) &&
     trimmed.endsWith(HEARTBEAT_TRANSCRIPT_PROMPT)
   ) {
     return true;
@@ -324,6 +329,7 @@ export function isHeartbeatUserMessage(
   );
 }
 
+/** Return whether an assistant message is only a heartbeat acknowledgement. */
 export function isHeartbeatOkResponse(
   message: { role: string; content?: unknown },
   ackMaxChars?: number,
@@ -443,6 +449,7 @@ function resolveHeartbeatArtifactSpanEnd(
   return index;
 }
 
+/** Remove heartbeat-only prompt, ack, and silent tool artifacts from a transcript. */
 export function filterHeartbeatTranscriptArtifacts<T extends { role: string; content?: unknown }>(
   messages: T[],
   ackMaxChars?: number,

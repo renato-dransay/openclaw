@@ -1,3 +1,6 @@
+/**
+ * Public SDK subpath for realtime voice provider types, runtime helpers, and talk events.
+ */
 export type { RealtimeVoiceProviderPlugin } from "../plugins/types.js";
 export type {
   RealtimeVoiceAudioFormat,
@@ -84,6 +87,19 @@ export {
   type RealtimeVoiceForcedConsultNativeRecentOptions,
   type RealtimeVoiceForcedConsultTimer,
 } from "../talk/forced-consult-coordinator.js";
+export {
+  createRealtimeVoiceTurnContextTracker,
+  type RealtimeVoiceTurnContextHandle,
+  type RealtimeVoiceTurnContextTracker,
+  type RealtimeVoiceTurnContextTrackerOptions,
+} from "../talk/turn-context-tracker.js";
+export {
+  createRealtimeVoiceOutputActivityTracker,
+  type RealtimeVoiceOutputActivityDelta,
+  type RealtimeVoiceOutputActivitySnapshot,
+  type RealtimeVoiceOutputActivityTracker,
+  type RealtimeVoiceOutputActivityTrackerOptions,
+} from "../talk/output-activity-tracker.js";
 export {
   buildRealtimeVoiceAgentConsultChatMessage,
   buildRealtimeVoiceAgentConsultPolicyInstructions,

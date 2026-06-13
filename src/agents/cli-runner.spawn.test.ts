@@ -1,3 +1,4 @@
+/** Tests CLI runner process spawning, logging, diagnostics, and live-session paths. */
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,14 @@ import {
   replyRunRegistry,
 } from "../auto-reply/reply/reply-run-registry.js";
 import { onAgentEvent, resetAgentEventsForTest } from "../infra/agent-events.js";
+import {
+  onInternalDiagnosticEvent,
+  waitForDiagnosticEventsDrained,
+} from "../infra/diagnostic-events.js";
+import {
+  getDiagnosticSessionActivitySnapshot,
+  resetDiagnosticRunActivityForTest,
+} from "../logging/diagnostic-run-activity.js";
 import type { getProcessSupervisor } from "../process/supervisor/index.js";
 import {
   makeBootstrapWarn as realMakeBootstrapWarn,
@@ -31,6 +40,7 @@ import {
   executePreparedCliRun,
 } from "./cli-runner/execute.js";
 import { buildSystemPrompt } from "./cli-runner/helpers.js";
+import { cliBackendLog, formatCliBackendOutputDigest } from "./cli-runner/log.js";
 import { setCliRunnerPrepareTestDeps } from "./cli-runner/prepare.js";
 import type { PreparedCliRunContext } from "./cli-runner/types.js";
 import { createClaudeApiErrorFixture } from "./test-helpers/claude-api-error-fixture.js";
@@ -45,6 +55,7 @@ type SupervisorSpawnFn = ProcessSupervisor["spawn"];
 
 beforeEach(() => {
   resetAgentEventsForTest();
+  resetDiagnosticRunActivityForTest();
   resetClaudeLiveSessionsForTest();
   replyRunTesting.resetReplyRunRegistry();
   restoreCliRunnerPrepareTestDeps();
@@ -53,6 +64,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
+  resetDiagnosticRunActivityForTest();
   resetClaudeLiveSessionsForTest();
   replyRunTesting.resetReplyRunRegistry();
 });
@@ -73,7 +86,10 @@ function buildPreparedCliRunContext(params: {
   skillsSnapshot?: PreparedCliRunContext["params"]["skillsSnapshot"];
   thinkLevel?: PreparedCliRunContext["params"]["thinkLevel"];
   workspaceDir?: string;
+  timeoutMs?: number;
 }): PreparedCliRunContext {
+  // Produces a prepared context without invoking prepare.runtime, keeping spawn
+  // assertions focused on execute/runtime behavior.
   const workspaceDir = params.workspaceDir ?? "/tmp";
   const baseBackend =
     params.provider === "claude-cli"
@@ -116,7 +132,7 @@ function buildPreparedCliRunContext(params: {
       provider: params.provider,
       model: params.model,
       thinkLevel: params.thinkLevel,
-      timeoutMs: 1_000,
+      timeoutMs: params.timeoutMs ?? 1_000,
       runId: params.runId,
       skillsSnapshot: params.skillsSnapshot,
     },
@@ -185,6 +201,8 @@ async function expectRejectsWithFields(
   promise: Promise<unknown>,
   expected: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  // Failover errors carry structured fields; this helper verifies them while
+  // preserving the original object for deeper assertions.
   try {
     await promise;
   } catch (error) {
@@ -249,6 +267,11 @@ async function withTempOpenClawHome(run: (home: string) => Promise<void>): Promi
 }
 
 describe("runCliAgent spawn path", () => {
+  it("formats output digests without logging response content", () => {
+    expect(formatCliBackendOutputDigest("one")).toBe("outBytes=3 outHash=7692c3ad3540");
+    expect(formatCliBackendOutputDigest("∑")).toBe("outBytes=3 outHash=be27c7179a61");
+  });
+
   it("formats redacted CLI resume diagnostics without exposing raw session ids", () => {
     const logLine = buildCliExecLogLine({
       provider: "claude-cli",
@@ -622,15 +645,33 @@ describe("runCliAgent spawn path", () => {
       sessionId: "openclaw-session",
       sessionFile: "/tmp/session.jsonl",
       workspaceDir: "/tmp",
+      cwd: "/tmp/task-repo",
       prompt: "hi",
       timeoutMs: 1_000,
       runId: "run-claude-channel-wrapper",
       messageChannel: "telegram",
       messageProvider: "acp",
+      currentChannelId: "telegram:-100123:topic:42",
+      currentThreadTs: "42",
+      currentMessageId: "reply-message-1",
+      senderId: "sender-1",
+      senderIsOwner: true,
+      persistAssistantTranscript: true,
+      storePath: "/tmp/sessions.json",
+      currentInboundEventKind: "room_event",
     });
 
     expect(params.messageChannel).toBe("telegram");
     expect(params.messageProvider).toBe("acp");
+    expect(params.currentChannelId).toBe("telegram:-100123:topic:42");
+    expect(params.currentThreadTs).toBe("42");
+    expect(params.currentMessageId).toBe("reply-message-1");
+    expect(params.senderId).toBe("sender-1");
+    expect(params.senderIsOwner).toBe(true);
+    expect(params.cwd).toBe("/tmp/task-repo");
+    expect(params.persistAssistantTranscript).toBe(true);
+    expect(params.storePath).toBe("/tmp/sessions.json");
+    expect(params.currentInboundEventKind).toBe("room_event");
   });
 
   it("forwards static extra system prompt through the compat wrapper", () => {
@@ -666,6 +707,7 @@ describe("runCliAgent spawn path", () => {
   });
 
   it("runs CLI through supervisor and returns payload", async () => {
+    const logInfoSpy = vi.spyOn(cliBackendLog, "info").mockImplementation(() => undefined);
     supervisorSpawnMock.mockResolvedValueOnce(
       createManagedRun({
         reason: "exit",
@@ -686,32 +728,44 @@ describe("runCliAgent spawn path", () => {
     });
     context.reusableCliSession = { sessionId: "thread-123" };
 
-    const result = await executePreparedCliRun(context, "thread-123");
+    try {
+      const result = await executePreparedCliRun(context, "thread-123");
 
-    expect(result.text).toBe("ok");
-    const input = mockCallArg(supervisorSpawnMock) as {
-      argv?: string[];
-      mode?: string;
-      timeoutMs?: number;
-      noOutputTimeoutMs?: number;
-      replaceExistingScope?: boolean;
-      scopeKey?: string;
-    };
-    expect(input.mode).toBe("child");
-    expect(input.argv).toEqual([
-      "codex",
-      "exec",
-      "resume",
-      "thread-123",
-      "--skip-git-repo-check",
-      "--model",
-      "gpt-5.4",
-      "hi",
-    ]);
-    expect(input.timeoutMs).toBe(1_000);
-    expect(input.noOutputTimeoutMs).toBeGreaterThanOrEqual(1_000);
-    expect(input.replaceExistingScope).toBe(true);
-    expect(input.scopeKey).toContain("thread-123");
+      expect(result.text).toBe("ok");
+      const input = mockCallArg(supervisorSpawnMock) as {
+        argv?: string[];
+        mode?: string;
+        timeoutMs?: number;
+        noOutputTimeoutMs?: number;
+        replaceExistingScope?: boolean;
+        scopeKey?: string;
+      };
+      expect(input.mode).toBe("child");
+      expect(input.argv).toEqual([
+        "codex",
+        "exec",
+        "resume",
+        "thread-123",
+        "--skip-git-repo-check",
+        "--model",
+        "gpt-5.4",
+        "hi",
+      ]);
+      expect(input.timeoutMs).toBe(1_000);
+      expect(input.noOutputTimeoutMs).toBeGreaterThanOrEqual(1_000);
+      expect(input.replaceExistingScope).toBe(true);
+      expect(input.scopeKey).toContain("thread-123");
+
+      const turnLog = logInfoSpy.mock.calls
+        .map(([message]) => message)
+        .find((message) => message.startsWith("cli turn:"));
+      expect(turnLog).toContain("provider=codex-cli");
+      expect(turnLog).toContain("model=gpt-5.4");
+      expect(turnLog).toContain("outBytes=2 outHash=2689367b205c");
+      expect(turnLog).not.toContain("ok");
+    } finally {
+      logInfoSpy.mockRestore();
+    }
   });
 
   it("passes Codex system prompts through model_instructions_file", async () => {
@@ -876,6 +930,7 @@ describe("runCliAgent spawn path", () => {
   });
 
   it("reuses a Claude live session process across turns", async () => {
+    const logInfoSpy = vi.spyOn(cliBackendLog, "info").mockImplementation(() => undefined);
     const agentEvents: unknown[] = [];
     const stop = onAgentEvent((evt) => {
       if (evt.stream === "assistant") {
@@ -974,7 +1029,16 @@ describe("runCliAgent spawn path", () => {
         { text: "one", delta: "one" },
         { text: "two", delta: "two" },
       ]);
+      const turnLogs = logInfoSpy.mock.calls
+        .map(([message]) => message)
+        .filter((message) => message.startsWith("claude live session turn:"));
+      expect(turnLogs).toHaveLength(2);
+      expect(turnLogs[0]).toContain("outBytes=3 outHash=7692c3ad3540");
+      expect(turnLogs[1]).toContain("outBytes=3 outHash=3fc4ccfe7458");
+      expect(turnLogs.join("\n")).not.toContain("one");
+      expect(turnLogs.join("\n")).not.toContain("two");
     } finally {
+      logInfoSpy.mockRestore();
       stop();
     }
   });
@@ -1600,6 +1664,164 @@ ${JSON.stringify({
     expect(parsed.response.request_id).toBe("req-allow");
     expect(parsed.response.response.behavior).toBe("allow");
     expect(parsed.response.response.toolUseID).toBe("tool-allow-1");
+  });
+
+  it("reports Claude live stream progress and keeps native tools fresh while they are running", async () => {
+    vi.useFakeTimers({
+      toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+    });
+    vi.setSystemTime(new Date("2026-05-28T00:00:00.000Z"));
+    const diagnosticEvents: string[] = [];
+    const stopDiagnostics = onInternalDiagnosticEvent((event) => {
+      if (event.type === "run.progress" || event.type.startsWith("tool.execution.")) {
+        diagnosticEvents.push(event.type);
+      }
+    });
+    let stdoutListener: ((chunk: string) => void) | undefined;
+    const stdin = {
+      write: vi.fn((data: string, cb?: (err?: Error | null) => void) => {
+        stdoutListener?.(
+          [
+            JSON.stringify({
+              type: "system",
+              subtype: "init",
+              session_id: "live-diagnostics",
+            }),
+            JSON.stringify({
+              type: "assistant",
+              session_id: "live-diagnostics",
+              message: {
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "tool-live-1",
+                    name: "Bash",
+                    input: { command: "sleep 45" },
+                  },
+                ],
+              },
+            }),
+          ].join("\n") + "\n",
+        );
+        cb?.();
+      }),
+      end: vi.fn(),
+    };
+    supervisorSpawnMock.mockImplementation(async (...args: unknown[]) => {
+      const input = (args[0] ?? {}) as { onStdout?: (chunk: string) => void };
+      stdoutListener = input.onStdout;
+      return {
+        runId: "live-run-diagnostics",
+        pid: 3060,
+        startedAtMs: Date.now(),
+        stdin,
+        wait: vi.fn(() => new Promise(() => {})),
+        cancel: vi.fn(),
+      };
+    });
+
+    try {
+      const context = buildPreparedCliRunContext({
+        provider: "claude-cli",
+        model: "sonnet",
+        runId: "run-live-diagnostics",
+        sessionId: "session-live-diagnostics",
+        sessionKey: "agent:main:diagnostics",
+        prompt: "hello",
+        backend: { liveSession: "claude-stdio" },
+        timeoutMs: 120_000,
+      });
+      const resultPromise = runClaudeLiveSessionTurn({
+        context,
+        args: context.preparedBackend.backend.args ?? [],
+        env: {},
+        prompt: "hello",
+        useResume: false,
+        noOutputTimeoutMs: 120_000,
+        getProcessSupervisor: () => ({
+          spawn: (params: Parameters<SupervisorSpawnFn>[0]) =>
+            supervisorSpawnMock(params) as ReturnType<SupervisorSpawnFn>,
+          cancel: vi.fn(),
+          cancelScope: vi.fn(),
+          reconcileOrphans: vi.fn(),
+          getRecord: vi.fn(),
+        }),
+        onAssistantDelta: () => {},
+        cleanup: async () => {},
+      });
+
+      await waitForDiagnosticEventsDrained();
+      await vi.waitFor(() =>
+        expect(
+          getDiagnosticSessionActivitySnapshot({
+            sessionKey: "agent:main:diagnostics",
+          }).activeToolName,
+        ).toBe("Bash"),
+      );
+      expect(
+        getDiagnosticSessionActivitySnapshot({ sessionKey: "agent:main:diagnostics" })
+          .lastProgressReason,
+      ).toBe("cli_live:tool_started");
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      await waitForDiagnosticEventsDrained();
+      expect(
+        getDiagnosticSessionActivitySnapshot({ sessionKey: "agent:main:diagnostics" })
+          .lastProgressReason,
+      ).toBe("cli_live:tool_running");
+      expect(
+        getDiagnosticSessionActivitySnapshot({ sessionKey: "agent:main:diagnostics" })
+          .lastProgressAgeMs,
+      ).toBeLessThan(100);
+
+      stdoutListener?.(
+        [
+          JSON.stringify({
+            type: "user",
+            session_id: "live-diagnostics",
+            message: {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "tool-live-1",
+                  content: "done",
+                },
+              ],
+            },
+          }),
+          JSON.stringify({
+            type: "assistant",
+            session_id: "live-diagnostics",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "ok" }],
+            },
+          }),
+          JSON.stringify({
+            type: "result",
+            session_id: "live-diagnostics",
+            result: "ok",
+          }),
+        ].join("\n") + "\n",
+      );
+
+      await expect(resultPromise).resolves.toMatchObject({ output: { text: "ok" } });
+      await waitForDiagnosticEventsDrained();
+      expect(
+        getDiagnosticSessionActivitySnapshot({ sessionKey: "agent:main:diagnostics" })
+          .activeToolName,
+      ).toBeUndefined();
+      expect(
+        getDiagnosticSessionActivitySnapshot({ sessionKey: "agent:main:diagnostics" })
+          .lastProgressReason,
+      ).toBe("cli_live:result");
+      expect(diagnosticEvents).toContain("tool.execution.started");
+      expect(diagnosticEvents).toContain("tool.execution.completed");
+    } finally {
+      stopDiagnostics();
+    }
   });
 
   it("answers Claude live control_request can_use_tool with deny when exec policy is restrictive", async () => {

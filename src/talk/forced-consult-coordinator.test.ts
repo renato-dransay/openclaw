@@ -1,4 +1,6 @@
+// Forced consult coordinator tests cover forced handoff to agent consultation.
 import { describe, expect, it, vi } from "vitest";
+import { MAX_TIMER_TIMEOUT_MS } from "../shared/number-coercion.js";
 import { createRealtimeVoiceForcedConsultCoordinator } from "./forced-consult-coordinator.js";
 
 describe("realtime voice forced consult coordinator", () => {
@@ -17,6 +19,8 @@ describe("realtime voice forced consult coordinator", () => {
       vi.advanceTimersByTime(250);
 
       expect(run).not.toHaveBeenCalled();
+      expect(coordinator.hasRecent("Can you check this?")).toBe(true);
+      vi.advanceTimersByTime(2_001);
       expect(coordinator.hasRecent("Can you check this?")).toBe(false);
     } finally {
       vi.useRealTimers();
@@ -110,6 +114,16 @@ describe("realtime voice forced consult coordinator", () => {
     }
   });
 
+  it("matches remembered question aliases", () => {
+    const coordinator = createRealtimeVoiceForcedConsultCoordinator();
+    const handle = coordinator.prepare("check server status", { id: "forced-1" });
+
+    coordinator.rememberQuestion(handle!, "Please inspect the server health");
+
+    expect(coordinator.findRecent("inspect server health")).toEqual(handle);
+    expect(coordinator.hasRecent("check server status")).toBe(true);
+  });
+
   it("consumes the only pending handle while delivered handles are retained", () => {
     vi.useFakeTimers();
     try {
@@ -143,6 +157,21 @@ describe("realtime voice forced consult coordinator", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("caps oversized forced consult schedule delays", () => {
+    const scheduledDelays: number[] = [];
+    const coordinator = createRealtimeVoiceForcedConsultCoordinator({
+      setTimer: (_fn, ms) => {
+        scheduledDelays.push(ms);
+        return { clear: vi.fn() };
+      },
+    });
+    const pending = coordinator.prepare("check status", { id: "forced-1" });
+
+    coordinator.schedule(pending!, Number.MAX_SAFE_INTEGER, vi.fn());
+
+    expect(scheduledDelays).toEqual([MAX_TIMER_TIMEOUT_MS]);
   });
 
   it("reports cancelled handles until the dedupe window expires", () => {

@@ -1,3 +1,4 @@
+// Qa Lab plugin module implements slack live behavior.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -5,8 +6,10 @@ import { createSlackWebClient, createSlackWriteClient } from "@openclaw/slack/ap
 import type { WebClient } from "@slack/web-api";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
 import { uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { z } from "zod";
+import { QA_EVIDENCE_FILENAME, buildLiveTransportEvidenceSummary } from "../../evidence-summary.js";
 import { startQaGatewayChild } from "../../gateway-child.js";
 import { DEFAULT_QA_LIVE_PROVIDER_MODE } from "../../providers/index.js";
 import {
@@ -17,10 +20,12 @@ import {
 import {
   acquireQaCredentialLease,
   startQaCredentialLeaseHeartbeat,
-  type QaCredentialRole,
 } from "../shared/credential-lease.runtime.js";
+import {
+  appendQaLiveLaneIssue as appendLiveLaneIssue,
+  buildQaLiveLaneArtifactsError as buildLiveLaneArtifactsError,
+} from "../shared/live-artifacts.js";
 import { startQaLiveLaneGateway } from "../shared/live-gateway.runtime.js";
-import { appendLiveLaneIssue, buildLiveLaneArtifactsError } from "../shared/live-lane-helpers.js";
 import {
   collectLiveTransportStandardScenarioCoverage,
   selectLiveTransportScenarios,
@@ -45,7 +50,7 @@ type SlackChannelStatus = {
 
 type SlackChannelReadinessMode = "connected" | "started";
 
-const SLACK_QA_READY_TIMEOUT_MS = 45_000;
+const SLACK_QA_DEFAULT_READY_TIMEOUT_MS = 45_000;
 const SLACK_QA_READY_STABILITY_MS = 3_000;
 const SLACK_QA_GATEWAY_STOP_SETTLE_MS = 3_000;
 const SLACK_QA_RETRYABLE_SCENARIO_ATTEMPTS = 2;
@@ -94,6 +99,7 @@ type SlackQaBeforeRunResult =
     };
 
 type SlackQaConfigOverrides = {
+  allowFrom?: string[];
   approvals?: {
     exec?: boolean;
     plugin?: boolean;
@@ -118,6 +124,8 @@ type SlackQaScenarioDefinition = LiveTransportScenarioDefinition<SlackQaScenario
   buildRun: (sutUserId: string) => SlackQaScenarioRun;
   configOverrides?: SlackQaConfigOverrides;
 };
+
+type SlackQaGatewayHarness = Awaited<ReturnType<typeof startQaLiveLaneGateway>>;
 
 type SlackAuthIdentity = {
   botId?: string;
@@ -207,6 +215,7 @@ type SlackQaScenarioResult = {
     responseObservedAt: string;
     source: "approval-request-to-resolution" | "request-to-observed-message";
   };
+  standardId?: string;
   status: "fail" | "pass";
   title: string;
 };
@@ -218,26 +227,6 @@ export type SlackQaRunResult = {
   reportPath: string;
   scenarios: SlackQaScenarioResult[];
   summaryPath: string;
-};
-
-type SlackQaSummary = {
-  channelId: string;
-  cleanupIssues: string[];
-  counts: {
-    failed: number;
-    passed: number;
-    total: number;
-  };
-  credentials: {
-    credentialId?: string;
-    kind: string;
-    ownerId?: string;
-    role?: QaCredentialRole;
-    source: "convex" | "env";
-  };
-  finishedAt: string;
-  scenarios: SlackQaScenarioResult[];
-  startedAt: string;
 };
 
 type SlackCredentialLease = Awaited<ReturnType<typeof acquireQaCredentialLease<SlackQaRuntimeEnv>>>;
@@ -329,7 +318,10 @@ const SLACK_QA_SCENARIOS: SlackQaScenarioDefinition[] = [
     standardId: "allowlist-block",
     title: "Slack non-allowlisted sender does not trigger",
     timeoutMs: 8_000,
-    configOverrides: { users: ["U_OPENCLAW_QA_NEVER_ALLOWED"] },
+    configOverrides: {
+      allowFrom: ["U_OPENCLAW_QA_NEVER_ALLOWED"],
+      users: ["U_OPENCLAW_QA_NEVER_ALLOWED"],
+    },
     buildRun: (sutUserId) => {
       const token = `SLACK_QA_BLOCK_${randomUUID().slice(0, 8).toUpperCase()}`;
       return {
@@ -526,14 +518,6 @@ function inferSlackCredentialSource(
   return normalized === "convex" ? "convex" : "env";
 }
 
-function inferSlackCredentialRole(value: string | undefined): QaCredentialRole | undefined {
-  const normalized = value?.trim().toLowerCase();
-  if (normalized === "ci" || normalized === "maintainer") {
-    return normalized;
-  }
-  return undefined;
-}
-
 function normalizeSlackId(value: string, label: string) {
   const normalized = value.trim();
   if (!/^[A-Z][A-Z0-9]+$/.test(normalized)) {
@@ -651,7 +635,7 @@ function buildSlackQaConfig(
             mode: "socket",
             botToken: params.sutBotToken,
             appToken: params.sutAppToken,
-            allowFrom: [params.driverBotUserId],
+            allowFrom: params.overrides?.allowFrom ?? [params.driverBotUserId],
             groupPolicy: "allowlist",
             allowBots: true,
             replyToMode: params.overrides?.replyToMode ?? "off",
@@ -939,7 +923,9 @@ async function waitForSlackScenarioReply(params: {
         { cause: error },
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1_000);
+    });
   }
   throw new Error(`timed out after ${params.timeoutMs}ms waiting for Slack message`);
 }
@@ -956,7 +942,13 @@ async function waitForSlackNoReply(params: {
   timeoutMs: number;
 }) {
   const startedAt = Date.now();
-  while (Date.now() - startedAt < params.timeoutMs) {
+  const observedKeys = new Set(
+    params.observedMessages
+      .map((message) => `${message.channelId ?? params.channelId}:${message.ts ?? ""}`)
+      .filter((key) => !key.endsWith(":")),
+  );
+  let elapsedMs = Date.now() - startedAt;
+  while (elapsedMs < params.timeoutMs) {
     const messages = await listSlackMessages({
       channelId: params.channelId,
       client: params.client,
@@ -972,24 +964,35 @@ async function waitForSlackNoReply(params: {
         continue;
       }
       const matchedScenario = text.includes(params.matchText);
-      params.observedMessages.push({
-        actionValues: collectSlackActionValues(message.blocks),
-        blockText: collectSlackBlockText(message.blocks),
-        botId: message.bot_id,
-        channelId: params.channelId,
-        matchedScenario,
-        scenarioId: params.observationScenarioId,
-        scenarioTitle: params.observationScenarioTitle,
-        text,
-        threadTs: message.thread_ts,
-        ts: message.ts,
-        userId: message.user,
-      });
+      const observedKey = `${params.channelId}:${message.ts}`;
+      if (!observedKeys.has(observedKey)) {
+        observedKeys.add(observedKey);
+        params.observedMessages.push({
+          actionValues: collectSlackActionValues(message.blocks),
+          blockText: collectSlackBlockText(message.blocks),
+          botId: message.bot_id,
+          channelId: params.channelId,
+          matchedScenario,
+          scenarioId: params.observationScenarioId,
+          scenarioTitle: params.observationScenarioTitle,
+          text,
+          threadTs: message.thread_ts,
+          ts: message.ts,
+          userId: message.user,
+        });
+      }
       if (matchedScenario) {
         throw new Error("unexpected Slack SUT reply observed");
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    elapsedMs = Date.now() - startedAt;
+    const remainingMs = params.timeoutMs - elapsedMs;
+    if (remainingMs > 0) {
+      await new Promise((resolve) => {
+        setTimeout(resolve, Math.min(1_000, remainingMs));
+      });
+    }
+    elapsedMs = Date.now() - startedAt;
   }
 }
 
@@ -1109,7 +1112,9 @@ async function waitForSlackApprovalPrompt(params: {
         observedAt: new Date().toISOString(),
       };
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1_000);
+    });
   }
   throw new Error(
     [
@@ -1177,7 +1182,9 @@ async function waitForSlackApprovalResolvedUpdate(params: {
         };
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 1_000);
+    });
   }
   throw new Error(
     `timed out after ${params.timeoutMs}ms waiting for Slack ${params.approvalKind} approval resolution update`,
@@ -1191,9 +1198,9 @@ function resolveSlackApprovalCheckpointConfig(env: NodeJS.ProcessEnv = process.e
   }
   const rawTimeout = env[SLACK_QA_APPROVAL_CHECKPOINT_TIMEOUT_MS_ENV]?.trim();
   const timeoutMs = rawTimeout
-    ? Number.parseInt(rawTimeout, 10)
+    ? parseStrictPositiveInteger(rawTimeout)
     : SLACK_QA_APPROVAL_CHECKPOINT_DEFAULT_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+  if (timeoutMs === undefined) {
     throw new Error(`${SLACK_QA_APPROVAL_CHECKPOINT_TIMEOUT_MS_ENV} must be a positive integer.`);
   }
   return {
@@ -1227,7 +1234,9 @@ async function waitForSlackApprovalCheckpointAck(params: {
         throw error;
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 500);
+    });
   }
   throw new Error(`timed out after ${params.timeoutMs}ms waiting for ${params.ackPath}`);
 }
@@ -1505,8 +1514,9 @@ async function waitForSlackChannelRunning(
   mode: SlackChannelReadinessMode,
 ): Promise<SlackChannelStatus> {
   const startedAt = Date.now();
+  const timeoutMs = resolveSlackQaReadyTimeoutMs();
   let lastStatus: SlackChannelStatus | undefined;
-  while (Date.now() - startedAt < SLACK_QA_READY_TIMEOUT_MS) {
+  while (Date.now() - startedAt < timeoutMs) {
     try {
       const payload = (await gateway.call(
         "channels.status",
@@ -1547,7 +1557,9 @@ async function waitForSlackChannelRunning(
     } catch {
       // retry
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => {
+      setTimeout(resolve, 500);
+    });
   }
   throw new Error(
     `slack account "${accountId}" did not become ready` +
@@ -1561,8 +1573,9 @@ async function waitForSlackChannelStable(
   mode: SlackChannelReadinessMode,
 ) {
   const startedAt = Date.now();
+  const timeoutMs = resolveSlackQaReadyTimeoutMs();
   let readySince: number | undefined;
-  while (Date.now() - startedAt < SLACK_QA_READY_TIMEOUT_MS) {
+  while (Date.now() - startedAt < timeoutMs) {
     const status = await waitForSlackChannelRunning(gateway, accountId, mode);
     const observedAt = Date.now();
     readySince = resolveSlackChannelReadySince({
@@ -1574,9 +1587,9 @@ async function waitForSlackChannelStable(
     if (readyForMs >= SLACK_QA_READY_STABILITY_MS) {
       return;
     }
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.max(500, SLACK_QA_READY_STABILITY_MS - readyForMs)),
-    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, Math.max(500, SLACK_QA_READY_STABILITY_MS - readyForMs));
+    });
   }
   throw new Error(
     `slack account "${accountId}" did not remain ready for ${SLACK_QA_READY_STABILITY_MS}ms`,
@@ -1607,6 +1620,14 @@ function resolveSlackChannelReadySince(params: {
     return params.status.lastConnectedAt;
   }
   return params.previousReadySince ?? params.observedAt;
+}
+
+function resolveSlackQaReadyTimeoutMs(env: NodeJS.ProcessEnv = process.env) {
+  const raw = env.OPENCLAW_QA_TRANSPORT_READY_TIMEOUT_MS;
+  if (!raw) {
+    return SLACK_QA_DEFAULT_READY_TIMEOUT_MS;
+  }
+  return parseStrictPositiveInteger(raw) ?? SLACK_QA_DEFAULT_READY_TIMEOUT_MS;
 }
 
 function isRetryableSlackQaScenarioError(error: unknown) {
@@ -1718,6 +1739,18 @@ function renderSlackQaMarkdown(params: {
   return lines.join("\n");
 }
 
+async function preserveSlackGatewayDebugArtifacts(params: {
+  cleanupIssues: string[];
+  gatewayDebugDirPath: string;
+  gatewayHarness: SlackQaGatewayHarness;
+}) {
+  await params.gatewayHarness
+    .stop({ preserveToDir: params.gatewayDebugDirPath })
+    .catch((error: unknown) => {
+      appendLiveLaneIssue(params.cleanupIssues, "gateway debug preservation failed", error);
+    });
+}
+
 export async function runSlackQaLive(params: {
   alternateModel?: string;
   credentialRole?: string;
@@ -1744,7 +1777,6 @@ export async function runSlackQaLive(params: {
   const sutAccountId = params.sutAccountId?.trim() || "sut";
   const scenarios = findScenario(params.scenarioIds);
   const requestedCredentialSource = inferSlackCredentialSource(params.credentialSource);
-  const requestedCredentialRole = inferSlackCredentialRole(params.credentialRole);
   const redactPublicMetadata = isTruthyOptIn(process.env[QA_REDACT_PUBLIC_METADATA_ENV]);
   const includeObservedMessageContent = isTruthyOptIn(process.env[SLACK_QA_CAPTURE_CONTENT_ENV]);
   const startedAt = new Date().toISOString();
@@ -1789,7 +1821,7 @@ export async function runSlackQaLive(params: {
     for (const scenario of scenarios) {
       let scenarioAttempt = 1;
       while (true) {
-        let gatewayHarness: Awaited<ReturnType<typeof startQaLiveLaneGateway>> | undefined;
+        let gatewayHarness: SlackQaGatewayHarness | undefined;
         try {
           assertLeaseHealthy();
           gatewayHarness = await startQaLiveLaneGateway({
@@ -1856,6 +1888,7 @@ export async function runSlackQaLive(params: {
               approval: approval.artifact,
               id: scenario.id,
               title: scenario.title,
+              standardId: scenario.standardId,
               status: "pass",
               details: [
                 `${scenarioRun.approvalKind} approval resolved ${scenarioRun.decision} in ${approval.rttMs}ms`,
@@ -1912,6 +1945,7 @@ export async function runSlackQaLive(params: {
             scenarioResults.push({
               id: scenario.id,
               title: scenario.title,
+              standardId: scenario.standardId,
               status: "pass",
               details: [
                 `reply matched in ${rttMs}ms`,
@@ -1946,6 +1980,7 @@ export async function runSlackQaLive(params: {
             scenarioResults.push({
               id: scenario.id,
               title: scenario.title,
+              standardId: scenario.standardId,
               status: "pass",
               details:
                 scenarioAttempt > 1 ? `no reply; retried ${scenarioAttempt - 1}x` : "no reply",
@@ -1963,6 +1998,7 @@ export async function runSlackQaLive(params: {
           scenarioResults.push({
             id: scenario.id,
             title: scenario.title,
+            standardId: scenario.standardId,
             status: "fail",
             details:
               scenarioAttempt > 1
@@ -1971,19 +2007,21 @@ export async function runSlackQaLive(params: {
           });
           preservedGatewayDebugArtifacts = true;
           if (gatewayHarness) {
-            await gatewayHarness
-              .stop({ keepTemp: true, preserveToDir: gatewayDebugDirPath })
-              .catch((stopError) => {
-                appendLiveLaneIssue(cleanupIssues, "gateway debug preservation failed", stopError);
-              });
+            await preserveSlackGatewayDebugArtifacts({
+              cleanupIssues,
+              gatewayDebugDirPath,
+              gatewayHarness,
+            });
           }
           break;
         } finally {
           if (!preservedGatewayDebugArtifacts && gatewayHarness) {
-            await gatewayHarness.stop().catch((error) => {
+            await gatewayHarness.stop().catch((error: unknown) => {
               appendLiveLaneIssue(cleanupIssues, "gateway stop failed", error);
             });
-            await new Promise((resolve) => setTimeout(resolve, SLACK_QA_GATEWAY_STOP_SETTLE_MS));
+            await new Promise((resolve) => {
+              setTimeout(resolve, SLACK_QA_GATEWAY_STOP_SETTLE_MS);
+            });
           }
         }
         if (scenarioResults.at(-1)?.id === scenario.id) {
@@ -2009,6 +2047,7 @@ export async function runSlackQaLive(params: {
     scenarioResults.push({
       id: "slack-canary",
       title: "Slack canary echo",
+      standardId: "canary",
       status: "fail",
       details: formatErrorMessage(error),
     });
@@ -2031,44 +2070,26 @@ export async function runSlackQaLive(params: {
 
   const finishedAt = new Date().toISOString();
   const reportPath = path.join(outputDir, "slack-qa-report.md");
-  const summaryPath = path.join(outputDir, "slack-qa-summary.json");
+  const summaryPath = path.join(outputDir, QA_EVIDENCE_FILENAME);
   const observedMessagesPath = path.join(outputDir, "slack-qa-observed-messages.json");
-  const passed = scenarioResults.filter((entry) => entry.status === "pass").length;
-  const failed = scenarioResults.filter((entry) => entry.status === "fail").length;
   const artifactScenarioResults = toSlackQaScenarioArtifactResults({
     scenarios: scenarioResults,
     includeContent: includeObservedMessageContent,
     redactMetadata: redactPublicMetadata,
   });
-  const summary: SlackQaSummary = {
-    credentials: credentialLease
-      ? {
-          source: credentialLease.source,
-          kind: credentialLease.kind,
-          role: credentialLease.role,
-          credentialId: redactPublicMetadata ? undefined : credentialLease.credentialId,
-          ownerId: redactPublicMetadata ? undefined : credentialLease.ownerId,
-        }
-      : {
-          source: requestedCredentialSource,
-          kind: "slack",
-          role: requestedCredentialRole,
-        },
-    channelId: runtimeEnv
-      ? redactPublicMetadata
-        ? "<redacted>"
-        : runtimeEnv.channelId
-      : "<unavailable>",
-    startedAt,
-    finishedAt,
-    cleanupIssues,
-    counts: {
-      total: scenarioResults.length,
-      passed,
-      failed,
-    },
-    scenarios: artifactScenarioResults,
-  };
+  const evidence = buildLiveTransportEvidenceSummary({
+    artifactPaths: [
+      { kind: "summary", path: path.basename(summaryPath) },
+      { kind: "report", path: path.basename(reportPath) },
+      { kind: "transport-observations", path: path.basename(observedMessagesPath) },
+    ],
+    checks: artifactScenarioResults,
+    env: process.env,
+    generatedAt: finishedAt,
+    primaryModel,
+    providerMode,
+    transportId: "slack",
+  });
   await fs.writeFile(
     observedMessagesPath,
     `${JSON.stringify(
@@ -2081,7 +2102,7 @@ export async function runSlackQaLive(params: {
       2,
     )}\n`,
   );
-  await fs.writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
+  await fs.writeFile(summaryPath, `${JSON.stringify(evidence, null, 2)}\n`);
   await fs.writeFile(
     reportPath,
     `${renderSlackQaMarkdown({
@@ -2114,7 +2135,9 @@ export const testing = {
   findScenario,
   isSlackChannelReadyForQa,
   parseSlackQaCredentialPayload,
+  preserveSlackGatewayDebugArtifacts,
   resolveSlackChannelReadySince,
+  resolveSlackQaReadyTimeoutMs,
   resolveSlackApprovalCheckpointConfig,
   resolveApprovalDecision,
   resolveSlackQaRuntimeEnv,

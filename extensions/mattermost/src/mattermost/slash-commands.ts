@@ -478,6 +478,7 @@ async function registerSlashCommandsLocked(params: {
               trigger: spec.trigger,
               teamId,
               token: winner.token,
+              url: callbackUrl,
               managed: false,
             });
             continue;

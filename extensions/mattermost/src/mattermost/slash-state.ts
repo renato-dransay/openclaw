@@ -119,11 +119,7 @@ export function releaseSlashCommandOwner(accountId: string): void {
   }
 }
 
-export function resolveSlashHandlerForToken(token: string): {
-  kind: "none" | "single" | "ambiguous";
-  handler?: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
-  accountIds?: string[];
-} {
+export function resolveSlashHandlerForToken(token: string): SlashHandlerMatch {
   const matches: Array<{
     accountId: string;
     handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>;

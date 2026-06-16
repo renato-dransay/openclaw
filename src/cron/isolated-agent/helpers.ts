@@ -7,6 +7,40 @@ import type { ReplyPayload } from "../../auto-reply/reply-payload.js";
 import { truncateUtf16Safe } from "../../utils.js";
 import { shouldSkipHeartbeatOnlyDelivery } from "../heartbeat-policy.js";
 
+const CRON_DENIAL_EXACT_TOKENS = ["SYSTEM_RUN_DENIED", "INVALID_REQUEST"] as const;
+const CRON_DENIAL_CASE_INSENSITIVE_TOKENS = [
+  "approval cannot safely bind",
+  "runtime denied",
+  "could not run",
+  "did not run",
+  "was denied",
+] as const;
+
+/**
+ * Detects a "cron denial" marker in agent output — a token indicating the run
+ * was refused/denied rather than completed normally. Returns the matched token,
+ * or undefined when none is present. Restored here after a branch merge dropped
+ * the definition while leaving the call site below intact.
+ */
+export function detectCronDenialToken(text: string | undefined): string | undefined {
+  const normalized = normalizeOptionalString(text);
+  if (!normalized) {
+    return undefined;
+  }
+  for (const token of CRON_DENIAL_EXACT_TOKENS) {
+    if (normalized.includes(token)) {
+      return token;
+    }
+  }
+  const lowerText = normalized.toLowerCase();
+  for (const token of CRON_DENIAL_CASE_INSENSITIVE_TOKENS) {
+    if (lowerText.includes(token)) {
+      return token;
+    }
+  }
+  return undefined;
+}
+
 type DeliveryPayload = Pick<
   ReplyPayload,
   "text" | "mediaUrl" | "mediaUrls" | "presentation" | "interactive" | "channelData" | "isError"
